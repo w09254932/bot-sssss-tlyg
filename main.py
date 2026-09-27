@@ -737,48 +737,10 @@ async def on_startup() -> None:
 async def health(request):
     return web.Response(text="ok")
 
-# ---------------- Mini App API ----------------
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-}
-
-async def api_calc_options(request):
-    return web.Response(status=204, headers=CORS_HEADERS)
-
-async def api_calc(request):
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({"error": "bad json"}, status=400, headers=CORS_HEADERS)
-    mode = data.get("mode", "individual")
-    if mode not in ("individual", "home", "team"):
-        mode = "individual"
-    my = parse_number(str(data.get("my", "")))
-    opp = parse_number(str(data.get("opp", "")))
-    if my is None or opp is None:
-        return web.json_response({"error": "invalid numbers"}, status=400, headers=CORS_HEADERS)
-    r = compute_battle(my, opp, mode)
-    return web.json_response({
-        "mode": mode,
-        "mode_label": MODE_LABELS.get(mode, ""),
-        "my_number": my,
-        "opp_number": opp,
-        "my_points": r["my_points"],
-        "opp_points": r["opp_points"],
-        "result": r["result_label"],
-        "my_result": r["my_result"],
-        "opp_result": r["opp_result"],
-        "text": r["text"],
-    }, headers=CORS_HEADERS)
-
 def main():
     dp.startup.register(on_startup)
     app = web.Application()
     app.router.add_get("/", health)
-    app.router.add_post("/api/calc", api_calc)
-    app.router.add_options("/api/calc", api_calc_options)
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     web.run_app(app, host="0.0.0.0", port=PORT)
