@@ -752,6 +752,7 @@ async def cb_shop(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardBuilder()
     for pid, d in avail:
         kb.button(text=f"{d.get('name','')} — {d.get('price',0)} ⭐", callback_data=f"buy:{pid}")
+    kb.button(text="📦 طلباتي", callback_data="myorders")
     kb.button(text="🔙 القائمة", callback_data="menu")
     kb.adjust(1)
     await callback.message.answer(
@@ -760,6 +761,11 @@ async def cb_shop(callback: CallbackQuery, state: FSMContext):
         "أكواد شدات فقط",
         reply_markup=kb.as_markup(),
     )
+
+@dp.callback_query(F.data == "myorders")
+async def cb_myorders(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(my_orders_text(callback.from_user.id))
 
 async def send_product_invoice(chat_id: int, pid: str, payload: str):
     p = get_product(pid)
@@ -1282,6 +1288,41 @@ async def notify_admin_order(buyer, pid, pname, code, stars, friend_id=None):
         await bot.send_message(ADMIN_ID, "\n".join(lines))
     except Exception as e:
         logger.exception("notify_admin_order failed: %s", e)
+
+def my_orders_text(uid: int) -> str:
+    if db is None:
+        return "📦 التخزين غير مفعّل حاليًا."
+    rows = {}
+    try:
+        for d in db.collection("orders").where("user_id", "==", uid).limit(200).stream():
+            rows[d.id] = d.to_dict()
+        for d in db.collection("orders").where("recipient_id", "==", uid).limit(200).stream():
+            rows[d.id] = d.to_dict()
+    except Exception as e:
+        logger.exception("my_orders failed: %s", e)
+        return "⚠️ تعذّر جلب طلباتك الآن."
+    orders = list(rows.values())
+    if not orders:
+        return "📦 لا توجد لديك طلبات بعد."
+    orders.sort(key=lambda r: r.get("ts") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    orders = orders[:15]
+    sep = "━━━━━━━━━━━━━━"
+    lines = ["📦 طلباتك:", sep]
+    for i, r in enumerate(orders, 1):
+        pname = r.get("product_name", "")
+        buyer = r.get("user_id")
+        recip = r.get("recipient_id", buyer)
+        if buyer == uid and recip != uid:
+            lines.append(f"{i}) 🎁 أهديت: {pname}")
+            lines.append(f"   لصديقك (آيدي: {recip})")
+        elif recip == uid and buyer != uid:
+            lines.append(f"{i}) 🎁 هدية من صديق: {pname}")
+            lines.append(f"   🔑 الكود: {r.get('code','')}")
+        else:
+            lines.append(f"{i}) 🛒 {pname}")
+            lines.append(f"   🔑 الكود: {r.get('code','')}")
+        lines.append(sep)
+    return "\n".join(lines)
 
 async def show_history(user_id: int, target: Message, mode: str):
     label = MODE_LABELS.get(mode, "")
