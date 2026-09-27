@@ -746,21 +746,17 @@ async def cb_shop(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     prods = list_products(active_only=True)
     avail = [(pid, d) for pid, d in prods if count_available_codes(pid) > 0]
-    if not avail:
-        await callback.message.answer("🛒 لا توجد منتجات متوفرة حاليًا.")
-        return
     kb = InlineKeyboardBuilder()
     for pid, d in avail:
         kb.button(text=f"{d.get('name','')} — {d.get('price',0)} ⭐", callback_data=f"buy:{pid}")
     kb.button(text="📦 طلباتي", callback_data="myorders")
     kb.button(text="🔙 القائمة", callback_data="menu")
     kb.adjust(1)
-    await callback.message.answer(
-        "🛒 اختر المنتج للشراء\n"
-        "\n"
-        "أكواد شدات فقط",
-        reply_markup=kb.as_markup(),
-    )
+    if avail:
+        text = "🛒 اختر المنتج للشراء\n\nأكواد شدات فقط"
+    else:
+        text = "🛒 لا توجد منتجات متوفرة حاليًا."
+    await callback.message.answer(text, reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data == "myorders")
 async def cb_myorders(callback: CallbackQuery):
