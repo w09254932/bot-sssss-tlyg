@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>حاسبة معركة الشعبية</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:#0f1020; --card:#1a1b32; --card2:#232544;
+    --gold:#e8b84b; --accent:#7b5cff; --text:#f2f2f7;
+    --muted:#a6a6c0; --win:#3ddc84; --loss:#ff5c6c; --line:#2c2e50;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  body{
+    font-family:'Segoe UI',Tahoma,sans-serif;color:var(--text);min-height:100vh;padding:16px;padding-bottom:40px;
+    background: linear-gradient(135deg, var(--bg) 0%, var(--card) 50%, #05050a 100%);
+    background-attachment:fixed;
+  }
+  .wrap{max-width:480px;margin:0 auto;position:relative;z-index:1}
+  h1{font-size:20px;text-align:center;margin-bottom:4px;color:var(--gold)}
+  .sub{text-align:center;color:var(--muted);font-size:13px;margin-bottom:18px}
+  .modes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:18px}
+  .mode{background:rgba(26,27,50,.85);backdrop-filter:blur(4px);border:1px solid var(--line);border-radius:14px;padding:12px 6px;text-align:center;cursor:pointer;transition:.15s;font-size:13px}
+  .mode .ic{font-size:20px;display:block;margin-bottom:4px}
+  .mode.active{border-color:var(--gold);background:var(--card2);box-shadow:0 0 0 1px var(--gold) inset,0 0 18px rgba(232,184,75,.25)}
+  .field{margin-bottom:14px}
+  .field label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+  .field input{width:100%;background:rgba(26,27,50,.85);backdrop-filter:blur(4px);border:1px solid var(--line);border-radius:12px;padding:14px;font-size:18px;color:var(--text);text-align:center;outline:none}
+  .field input:focus{border-color:var(--accent);box-shadow:0 0 14px rgba(123,92,255,.3)}
+  .btn{width:100%;background:linear-gradient(135deg,var(--accent),#a17bff);color:#fff;border:none;border-radius:14px;padding:16px;font-size:17px;font-weight:bold;cursor:pointer;margin-top:4px;box-shadow:0 6px 20px rgba(123,92,255,.35)}
+  .btn:active{transform:scale(.98)}
+  .btn[disabled]{opacity:.6}
+  .result{margin-top:20px;background:rgba(26,27,50,.9);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:16px;padding:18px;display:none}
+  .result.show{display:block;animation:fade .25s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .rhead{text-align:center;font-size:22px;font-weight:bold;margin-bottom:14px}
+  .rhead.win{color:var(--win)} .rhead.loss{color:var(--loss)} .rhead.tie{color:var(--gold)}
+  .row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);font-size:15px}
+  .row:last-child{border-bottom:none}
+  .row .v{font-weight:bold}
+  .note{margin-top:12px;color:var(--muted);font-size:13px;text-align:center}
+  .err{color:var(--loss);text-align:center;margin-top:12px;font-size:14px;display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔥 حاسبة معركة الشعبية</h1>
+  <div class="sub">اختر النوع وأدخل الأرقام</div>
+  <div class="modes" id="modes">
+    <div class="mode active" data-mode="individual"><span class="ic">⚔️</span>فردية</div>
+    <div class="mode" data-mode="home"><span class="ic">🏠</span>المنزل</div>
+    <div class="mode" data-mode="team"><span class="ic">👥</span>فريق</div>
+  </div>
+  <div class="field">
+    <label id="lblMy">عدد شعبيتك</label>
+    <input id="my" type="number" inputmode="numeric" placeholder="مثال: 20000">
+  </div>
+  <div class="field">
+    <label id="lblOpp">عدد شعبية الخصم</label>
+    <input id="opp" type="number" inputmode="numeric" placeholder="مثال: 10000">
+  </div>
+  <button class="btn" id="calc">احسب النتيجة</button>
+  <div class="err" id="err"></div>
+  <div class="result" id="result"></div>
+</div>
+<script>
+  const API = "https://bot-ai-pl24.onrender.com/api/calc";
+  const tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+  let mode = "individual";
+  const modesEl = document.getElementById("modes");
+  const lblMy = document.getElementById("lblMy");
+  const lblOpp = document.getElementById("lblOpp");
+  modesEl.addEventListener("click", (e) => {
+    const el = e.target.closest(".mode");
+    if (!el) return;
+    document.querySelectorAll(".mode").forEach(m => m.classList.remove("active"));
+    el.classList.add("active");
+    mode = el.dataset.mode;
+    if (mode === "team") { lblMy.textContent = "عدد شعبية تيمك"; lblOpp.textContent = "عدد شعبية تيم الخصم"; }
+    else { lblMy.textContent = "عدد شعبيتك"; lblOpp.textContent = "عدد شعبية الخصم"; }
+  });
+  const fmt = (x) => (Number(x) === Math.floor(Number(x))) ? String(Math.floor(x)) : Number(x).toFixed(1);
+  const nf = (n) => Number(n).toLocaleString("en-US");
+  async function calc() {
+    const err = document.getElementById("err");
+    const res = document.getElementById("result");
+    err.style.display = "none"; res.classList.remove("show");
+    const my = document.getElementById("my").value.trim();
+    const opp = document.getElementById("opp").value.trim();
+    if (!my || !opp) { err.textContent = "أدخل الرقمين أولًا"; err.style.display = "block"; return; }
+    const btn = document.getElementById("calc");
+    btn.disabled = true; btn.textContent = "جاري الحساب...";
+    try {
+      const r = await fetch(API, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ mode, my, opp }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "خطأ");
+      render(d);
+      if (tg) tg.HapticFeedback && tg.HapticFeedback.impactOccurred("medium");
+    } catch (e) {
+      err.textContent = "تعذّر الحساب، تأكد من الأرقام وحاول ثانية";
+      err.style.display = "block";
+    } finally {
+      btn.disabled = false; btn.textContent = "احسب النتيجة";
+    }
+  }
+  function render(d) {
+    const res = document.getElementById("result");
+    const isTeam = d.mode === "team";
+    let cls = "tie";
+    if (d.result.includes("فوز")) cls = "win";
+    else if (d.result.includes("خسارة")) cls = "loss";
+    const myLbl = isTeam ? "دعم تيمي" : "نقاطك";
+    const oppLbl = isTeam ? "دعم تيم خصمي" : "نقاط الخصم";
+    const myResLbl = isTeam ? "لكل شخص من تيمك" : "نقاطك النهائية";
+    const oppResLbl = isTeam ? "لكل شخص من تيم الخصم" : "نقاط الخصم النهائية";
+    const noteLine = (d.text || "").trim().split("\n").pop();
+    res.innerHTML = `
+      <div class="rhead ${cls}">${d.result}</div>
+      <div class="row"><span>${myLbl}</span><span class="v">${nf(d.my_number)} = ${d.my_points} نقطة</span></div>
+      <div class="row"><span>${oppLbl}</span><span class="v">${nf(d.opp_number)} = ${d.opp_points} نقطة</span></div>
+      <div class="row"><span>${myResLbl}</span><span class="v">${fmt(d.my_result)} نقطة</span></div>
+      <div class="row"><span>${oppResLbl}</span><span class="v">${fmt(d.opp_result)} نقطة</span></div>
+      <div class="note">${noteLine}</div>
+    `;
+    res.classList.add("show");
+  }
+  document.getElementById("calc").addEventListener("click", calc);
+</script>
+</body>
+</html>
