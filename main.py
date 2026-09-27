@@ -215,7 +215,7 @@ def reverse_calc_text(target: int, mode: str) -> str:
             prefix = f"{i}) " if len(wins) > 1 else ""
             lines.append(f"{prefix}{myword}: {_range_str(a)} ({a[2]})")
             lines.append(f"   {oppword}: {_range_str(b)} ({b[2]})")
-            lines.append(f"النتائج = {a[2]} + نصف {b[2]} = {target}")
+            lines.append(f"النتائج : {a[2]} + نصف نقاط الخصم = {target}")
     else:
         lines.append("✅ بالفوز: لا يوجد")
     lines.append("")
@@ -225,7 +225,7 @@ def reverse_calc_text(target: int, mode: str) -> str:
             if i > 1:
                 lines.append("")
             lines.append(f"{myword}: {_range_str(t)} ({t[2]})  تأخذ نصف نقاطك")
-            lines.append(f"النتائج = نصف {t[2]} = {target}")
+            lines.append(f"النتائج : نصف نقاطك = {target}")
     else:
         lines.append("❌ بالخسارة: لا يوجد")
     return "\n".join(lines)
