@@ -800,8 +800,8 @@ async def cb_buy(callback: CallbackQuery):
         f"🛒 {p.get('name','')} — {p.get('price',0)} ⭐\n"
         "━━━━━━━━━━━━━━\n"
         "اختر طريقة الشراء:\n\n"
-        "🎁 لنفسي: الكود يوصلك أنت.\n"
-        "👤 لصديق: الكود يُرسل لصديقك (تدخل آيديه).",
+        "🎁 لنفسي: الكود يوصلك أنت، وأنت مسؤول عنه، ممنوع مشاركته مع أشخاص.\n"
+        "👤 لصديق: الكود يُرسل لصديقك (تدخل آيدي حسابه في تيليجرام).",
         reply_markup=kb.as_markup(),
     )
 
@@ -892,7 +892,8 @@ async def on_successful_payment(message: Message):
             "🔑 كودك:\n"
             f"{code}\n"
             "━━━━━━━━━━━━━━\n"
-            "انسخ الكود واستخدمه 🌟"
+            "انسخ الكود واستخدمه.\n"
+            "أنت مسؤول عن الكود، ممنوع مشاركته مع أحد 🌟"
         )
         try:
             await bot.send_message(friend_id, gift_msg)
@@ -920,7 +921,8 @@ async def on_successful_payment(message: Message):
             "🔑 كودك:\n"
             f"{code}\n"
             "━━━━━━━━━━━━━━\n"
-            "انسخ الكود واستخدمه. شكرًا لك 🌟"
+            "انسخ الكود واستخدمه.\n"
+            "أنت مسؤول عن الكود، ممنوع مشاركته مع أحد 🌟"
         )
 
 @dp.message(StateFilter(BattleFSM.my_number))
