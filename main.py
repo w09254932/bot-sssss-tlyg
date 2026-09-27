@@ -911,9 +911,11 @@ async def on_successful_payment(message: Message):
             await message.answer("⚠️ تعذّر إرسال الكود لصديقك، تم استرجاع النجوم لك.")
             return
         save_order(message.from_user, pid, pname, code, sp.total_amount, recipient_id=friend_id)
+        await notify_admin_order(message.from_user, pid, pname, code, sp.total_amount, friend_id=friend_id)
         await message.answer(f"✅ تم إرسال الكود لصديقك (آيدي: {friend_id}) بنجاح 🎁\nشكرًا لك 🌟")
     else:
         save_order(message.from_user, pid, pname, code, sp.total_amount, recipient_id=message.from_user.id)
+        await notify_admin_order(message.from_user, pid, pname, code, sp.total_amount, friend_id=None)
         await message.answer(
             "✅ تم الشراء بنجاح!\n"
             f"المنتج: {pname}\n"
@@ -1189,6 +1191,17 @@ def user_exists(uid: int) -> bool:
     except Exception:
         return False
 
+def get_username(uid: int):
+    if db is None:
+        return None
+    try:
+        snap = db.collection("users").document(str(uid)).get()
+        if snap.exists:
+            return snap.to_dict().get("username")
+    except Exception:
+        pass
+    return None
+
 def pop_code(pid: str, user):
     if db is None:
         return None, None
@@ -1238,6 +1251,37 @@ def save_order(user, pid, pname, code, stars, recipient_id=None):
         })
     except Exception as e:
         logger.exception("save_order failed: %s", e)
+
+async def notify_admin_order(buyer, pid, pname, code, stars, friend_id=None):
+    if not ADMIN_ID:
+        return
+    bu = f"@{buyer.username}" if buyer.username else "بدون يوزر"
+    lines = [
+        "🧾 عملية شراء جديدة",
+        "━━━━━━━━━━━━━━",
+        f"المنتج: {pname}",
+        f"السعر: {stars} ⭐",
+        "━━━━━━━━━━━━━━",
+        f"👤 المشتري: {buyer.full_name}",
+        f"اليوزر: {bu}",
+        f"الآيدي: {buyer.id}",
+    ]
+    if friend_id:
+        fu = get_username(friend_id)
+        fu = f"@{fu}" if fu else "بدون يوزر"
+        lines += [
+            "━━━━━━━━━━━━━━",
+            "🎁 النوع: هدية لصديق",
+            f"اليوزر: {fu}",
+            f"الآيدي: {friend_id}",
+        ]
+    else:
+        lines += ["━━━━━━━━━━━━━━", "🛒 النوع: شراء لنفسه"]
+    lines += ["━━━━━━━━━━━━━━", f"🔑 الكود: {code}"]
+    try:
+        await bot.send_message(ADMIN_ID, "\n".join(lines))
+    except Exception as e:
+        logger.exception("notify_admin_order failed: %s", e)
 
 async def show_history(user_id: int, target: Message, mode: str):
     label = MODE_LABELS.get(mode, "")
