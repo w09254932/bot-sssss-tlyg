@@ -357,6 +357,9 @@ class BattleFSM(StatesGroup):
 class ReverseFSM(StatesGroup):
     points = State()
 
+class ShopFSM(StatesGroup):
+    friend_id = State()
+
 class AdminFSM(StatesGroup):
     broadcast = State()
     p_name = State()
@@ -372,9 +375,11 @@ async def send_menu(message: Message, state: FSMContext = None):
     name = message.chat.first_name or message.chat.full_name or "صديقي"
     await message.answer(
         f"👋 أهلًا يا {name} في حاسبة معركة الشعبية\n"
+        f"🆔 آيديك: <code>{message.chat.id}</code>\n"
         "\n"
         "اختر نوع حاسبة الشعبية:",
         reply_markup=menu_keyboard(),
+        parse_mode="HTML",
     )
 
 async def send_landing(message: Message, mode: str, state: FSMContext):
@@ -719,6 +724,26 @@ async def cb_shop(callback: CallbackQuery, state: FSMContext):
     kb.adjust(1)
     await callback.message.answer("🛒 اختر المنتج للشراء:", reply_markup=kb.as_markup())
 
+async def send_product_invoice(chat_id: int, pid: str, payload: str):
+    p = get_product(pid)
+    if not p or not p.get("active", True):
+        return False, "المنتج غير متوفر حاليًا."
+    if count_available_codes(pid) < 1:
+        return False, "نفد المخزون لهذا المنتج."
+    try:
+        await bot.send_invoice(
+            chat_id=chat_id,
+            title=p.get("name", "شدات"),
+            description=f"شحن {p.get('name','')} — تسليم فوري بعد الدفع",
+            payload=payload,
+            currency="XTR",
+            prices=[LabeledPrice(label=p.get("name", "شدات"), amount=int(p.get("price", 1)))],
+        )
+        return True, None
+    except Exception as e:
+        logger.exception("send_invoice failed: %s", e)
+        return False, "تعذّر إنشاء الفاتورة، حاول لاحقًا."
+
 @dp.callback_query(F.data.startswith("buy:"))
 async def cb_buy(callback: CallbackQuery):
     await callback.answer()
@@ -730,24 +755,66 @@ async def cb_buy(callback: CallbackQuery):
     if count_available_codes(pid) < 1:
         await callback.message.answer("نفد المخزون لهذا المنتج.")
         return
-    try:
-        await bot.send_invoice(
-            chat_id=callback.from_user.id,
-            title=p.get("name", "شدات"),
-            description=f"شحن {p.get('name','')} — تسليم فوري بعد الدفع",
-            payload=f"buy:{pid}",
-            currency="XTR",
-            prices=[LabeledPrice(label=p.get("name", "شدات"), amount=int(p.get("price", 1)))],
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎁 شراء لنفسي", callback_data=f"self:{pid}")
+    kb.button(text="👤 شراء لصديق", callback_data=f"gift:{pid}")
+    kb.adjust(1)
+    await callback.message.answer(
+        f"🛒 {p.get('name','')} — {p.get('price',0)} ⭐\nاختر طريقة الشراء:",
+        reply_markup=kb.as_markup(),
+    )
+
+@dp.callback_query(F.data.startswith("self:"))
+async def cb_buy_self(callback: CallbackQuery):
+    await callback.answer()
+    pid = callback.data.split(":", 1)[1]
+    ok, err = await send_product_invoice(callback.from_user.id, pid, f"buy:{pid}")
+    if not ok:
+        await callback.message.answer(err)
+
+@dp.callback_query(F.data.startswith("gift:"))
+async def cb_buy_gift(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    pid = callback.data.split(":", 1)[1]
+    await state.set_state(ShopFSM.friend_id)
+    await state.update_data(gift_pid=pid)
+    await callback.message.answer(
+        "👤 أرسل آيدي صديقك الرقمي (أرقام فقط):\n"
+        "صديقك يعرف آيديه من رسالة /start عندنا.\n"
+        "/cancel للإلغاء"
+    )
+
+@dp.message(StateFilter(ShopFSM.friend_id))
+async def got_friend_id(message: Message, state: FSMContext):
+    fid = parse_number(message.text or "")
+    if fid is None:
+        await message.answer("❌ أرسل آيدي رقمي صحيح (أرقام فقط).")
+        return
+    data = await state.get_data()
+    pid = data.get("gift_pid")
+    if not user_exists(fid):
+        await state.clear()
+        await message.answer(
+            "❌ هذا الآيدي غير مسجّل لدينا.\n"
+            "اطلب من صديقك يفتح البوت ويرسل /start أولًا، ثم أعد المحاولة."
         )
-    except Exception as e:
-        logger.exception("send_invoice failed: %s", e)
-        await callback.message.answer("تعذّر إنشاء الفاتورة، حاول لاحقًا.")
+        return
+    try:
+        await bot.send_chat_action(fid, "typing")
+    except Exception:
+        await state.clear()
+        await message.answer("❌ تعذّر الوصول لصديقك (قد يكون حاظر البوت). تأكد ثم أعد المحاولة.")
+        return
+    await state.clear()
+    ok, err = await send_product_invoice(message.from_user.id, pid, f"gift:{pid}:{fid}")
+    if not ok:
+        await message.answer(err)
 
 @dp.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery):
     ok = True
     try:
-        pid = q.invoice_payload.split(":", 1)[1]
+        pid = q.invoice_payload.split(":")[1]
         if count_available_codes(pid) < 1:
             ok = False
     except Exception:
@@ -760,11 +827,12 @@ async def pre_checkout(q: PreCheckoutQuery):
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: Message):
     sp = message.successful_payment
-    try:
-        pid = sp.invoice_payload.split(":", 1)[1]
-    except Exception:
+    parts = (sp.invoice_payload or "").split(":")
+    if len(parts) < 2:
         return
-    code = pop_code(pid, message.from_user)
+    kind, pid = parts[0], parts[1]
+    friend_id = int(parts[2]) if kind == "gift" and len(parts) >= 3 else None
+    code, ref = pop_code(pid, message.from_user)
     if code is None:
         try:
             await bot.refund_star_payment(message.from_user.id, sp.telegram_payment_charge_id)
@@ -773,16 +841,45 @@ async def on_successful_payment(message: Message):
         await message.answer("⚠️ عذرًا، نفد المخزون في آخر لحظة. تم استرجاع النجوم لك.")
         return
     p = get_product(pid) or {}
-    save_order(message.from_user, pid, p.get("name", ""), code, sp.total_amount)
-    await message.answer(
-        "✅ تم الشراء بنجاح!\n"
-        f"المنتج: {p.get('name','')}\n"
-        "━━━━━━━━━━━━━━\n"
-        "🔑 كودك:\n"
-        f"{code}\n"
-        "━━━━━━━━━━━━━━\n"
-        "انسخ الكود واستخدمه. شكرًا لك 🌟"
-    )
+    pname = p.get("name", "")
+    if friend_id:
+        gift_msg = (
+            "🎁 وصلك كود هدية!\n"
+            f"المنتج: {pname}\n"
+            "━━━━━━━━━━━━━━\n"
+            "🔑 كودك:\n"
+            f"{code}\n"
+            "━━━━━━━━━━━━━━\n"
+            "انسخ الكود واستخدمه 🌟"
+        )
+        try:
+            await bot.send_message(friend_id, gift_msg)
+        except Exception as e:
+            logger.exception("gift delivery failed: %s", e)
+            try:
+                if ref is not None:
+                    ref.update({"sold": False, "buyer_id": None, "sold_at": None})
+            except Exception:
+                pass
+            try:
+                await bot.refund_star_payment(message.from_user.id, sp.telegram_payment_charge_id)
+            except Exception:
+                pass
+            await message.answer("⚠️ تعذّر إرسال الكود لصديقك، تم استرجاع النجوم لك.")
+            return
+        save_order(message.from_user, pid, pname, code, sp.total_amount, recipient_id=friend_id)
+        await message.answer(f"✅ تم إرسال الكود لصديقك (آيدي: {friend_id}) بنجاح 🎁\nشكرًا لك 🌟")
+    else:
+        save_order(message.from_user, pid, pname, code, sp.total_amount, recipient_id=message.from_user.id)
+        await message.answer(
+            "✅ تم الشراء بنجاح!\n"
+            f"المنتج: {pname}\n"
+            "━━━━━━━━━━━━━━\n"
+            "🔑 كودك:\n"
+            f"{code}\n"
+            "━━━━━━━━━━━━━━\n"
+            "انسخ الكود واستخدمه. شكرًا لك 🌟"
+        )
 
 @dp.message(StateFilter(BattleFSM.my_number))
 async def got_my_number(message: Message, state: FSMContext):
@@ -1026,9 +1123,17 @@ def count_available_codes(pid: str) -> int:
         logger.exception("count_available_codes failed: %s", e)
         return 0
 
+def user_exists(uid: int) -> bool:
+    if db is None:
+        return False
+    try:
+        return db.collection("users").document(str(uid)).get().exists
+    except Exception:
+        return False
+
 def pop_code(pid: str, user):
     if db is None:
-        return None
+        return None, None
     try:
         docs = list(db.collection("codes").where("product_id", "==", pid).limit(500).stream())
         for d in docs:
@@ -1052,13 +1157,13 @@ def pop_code(pid: str, user):
 
             result = claim(transaction)
             if result is not None:
-                return result
-        return None
+                return result, ref
+        return None, None
     except Exception as e:
         logger.exception("pop_code failed: %s", e)
-        return None
+        return None, None
 
-def save_order(user, pid, pname, code, stars):
+def save_order(user, pid, pname, code, stars, recipient_id=None):
     if db is None:
         return
     try:
@@ -1070,6 +1175,7 @@ def save_order(user, pid, pname, code, stars):
             "product_name": pname,
             "code": code,
             "stars": stars,
+            "recipient_id": recipient_id if recipient_id is not None else user.id,
             "ts": datetime.now(timezone.utc),
         })
     except Exception as e:
