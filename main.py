@@ -17,6 +17,8 @@ from aiogram.types import (
     ChosenInlineResult,
     BotCommand,
     BotCommandScopeChat,
+    LabeledPrice,
+    PreCheckoutQuery,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -208,7 +210,8 @@ def menu_keyboard():
     kb.button(text="⚔️ معركة الشعبية الفردية", callback_data="battle_individual")
     kb.button(text="🏠 معركة شعبية المنزل", callback_data="battle_home")
     kb.button(text="👥 معركة الشعبية فريق", callback_data="battle_team")
-    kb.adjust(2, 1)
+    kb.button(text="🛒 شراء شدات", callback_data="shop")
+    kb.adjust(2, 1, 1)
     return kb.as_markup()
 
 def landing_keyboard(mode: str):
@@ -244,8 +247,17 @@ def cancel_keyboard():
 def admin_menu_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 الإحصائيات", callback_data="admin:stats")
+    kb.button(text="🛒 إدارة المتجر", callback_data="admin:store")
     kb.button(text="📢 بث رسالة", callback_data="admin:broadcast")
     kb.button(text="🚫 إدارة الحظر", callback_data="admin:ban")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def store_admin_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ إضافة منتج", callback_data="st:addp")
+    kb.button(text="📦 إضافة أكواد", callback_data="st:addc")
+    kb.button(text="📋 المنتجات والمخزون", callback_data="st:list")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -263,6 +275,10 @@ def compute_admin_stats() -> str:
         ind = c.get("mode_individual", 0)
         home = c.get("mode_home", 0)
         team = c.get("mode_team", 0)
+        try:
+            orders_count = len(list(db.collection("orders").limit(10000).stream()))
+        except Exception:
+            orders_count = 0
         return (
             "🛠 لوحة المالك - الإحصائيات\n"
             "━━━━━━━━━━━━━━\n"
@@ -270,7 +286,8 @@ def compute_admin_stats() -> str:
             f"⚔️ إجمالي المعارك: {total}\n"
             f"   • فردية: {ind}\n"
             f"   • منزل: {home}\n"
-            f"   • فريق: {team}"
+            f"   • فريق: {team}\n"
+            f"🛒 مبيعات المتجر: {orders_count}"
         )
     except Exception as e:
         logger.exception("admin stats failed: %s", e)
@@ -283,6 +300,9 @@ class BattleFSM(StatesGroup):
 
 class AdminFSM(StatesGroup):
     broadcast = State()
+    p_name = State()
+    p_price = State()
+    codes = State()
 
 dp = Dispatcher()
 bot = Bot(BOT_TOKEN)
@@ -402,43 +422,110 @@ async def cb_admin_soon(callback: CallbackQuery):
         return
     await callback.answer("🔜 قريبًا — نضيفها بالخطوة الجاية", show_alert=True)
 
-@dp.message(StateFilter(AdminFSM.broadcast), F.from_user.id == ADMIN_ID)
-async def got_broadcast(message: Message, state: FSMContext):
+# ---------------- Admin: Store management ----------------
+@dp.callback_query(F.data == "admin:store")
+async def cb_admin_store(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
     await state.clear()
-    await message.answer("⏳ جاري البث...")
-    sent, failed, total = await do_broadcast(message)
+    await callback.message.answer("🛒 إدارة المتجر:", reply_markup=store_admin_keyboard())
+
+@dp.callback_query(F.data == "st:addp")
+async def cb_st_addp(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(AdminFSM.p_name)
+    await callback.message.answer("أرسل اسم المنتج (مثال: 60 شدة):\n/cancel للإلغاء")
+
+@dp.message(StateFilter(AdminFSM.p_name), F.from_user.id == ADMIN_ID)
+async def got_p_name(message: Message, state: FSMContext):
+    await state.update_data(p_name=(message.text or "").strip())
+    await state.set_state(AdminFSM.p_price)
+    await message.answer("أرسل السعر بالنجوم (رقم فقط، مثال: 100):")
+
+@dp.message(StateFilter(AdminFSM.p_price), F.from_user.id == ADMIN_ID)
+async def got_p_price(message: Message, state: FSMContext):
+    price = parse_number(message.text or "")
+    if price is None or price < 1:
+        await message.answer("❌ أرسل رقمًا صحيحًا (1 فأكثر).")
+        return
+    data = await state.get_data()
+    add_product(data.get("p_name", "منتج"), price)
+    await state.clear()
     await message.answer(
-        "✅ انتهى البث\n"
-        "━━━━━━━━━━━━━━\n"
-        f"👥 إجمالي المستخدمين: {total}\n"
-        f"✅ وصلت: {sent}\n"
-        f"❌ فشلت: {failed}"
+        f"✅ تمت إضافة المنتج: {data.get('p_name','')} بسعر {price} ⭐",
+        reply_markup=store_admin_keyboard(),
     )
 
-async def do_broadcast(message: Message):
-    sent = failed = total = 0
-    if db is None:
-        return 0, 0, 0
-    try:
-        docs = list(db.collection("users").limit(10000).stream())
-    except Exception as e:
-        logger.exception("broadcast list failed: %s", e)
-        return 0, 0, 0
-    for d in docs:
-        u = d.to_dict()
-        if u.get("banned"):
-            continue
-        uid = u.get("user_id")
-        if not uid:
-            continue
-        total += 1
-        try:
-            await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)
-    return sent, failed, total
+@dp.callback_query(F.data == "st:addc")
+async def cb_st_addc(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    prods = list_products(active_only=False)
+    if not prods:
+        await callback.message.answer("لا توجد منتجات. أضف منتجًا أولًا.", reply_markup=store_admin_keyboard())
+        return
+    kb = InlineKeyboardBuilder()
+    for pid, d in prods:
+        kb.button(text=f"{d.get('name','')}", callback_data=f"st:c:{pid}")
+    kb.adjust(1)
+    await callback.message.answer("اختر المنتج لإضافة أكواد له:", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("st:c:"))
+async def cb_st_pick(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    pid = callback.data.split(":", 2)[2]
+    await state.set_state(AdminFSM.codes)
+    await state.update_data(codes_pid=pid)
+    await callback.message.answer("أرسل الأكواد — كل كود في سطر:\n/cancel للإلغاء")
+
+@dp.message(StateFilter(AdminFSM.codes), F.from_user.id == ADMIN_ID)
+async def got_codes(message: Message, state: FSMContext):
+    data = await state.get_data()
+    pid = data.get("codes_pid")
+    lines = [l.strip() for l in (message.text or "").splitlines() if l.strip()]
+    n = add_codes(pid, lines)
+    await state.clear()
+    await message.answer(f"✅ تمت إضافة {n} كود للمخزون.", reply_markup=store_admin_keyboard())
+
+@dp.callback_query(F.data == "st:list")
+async def cb_st_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    prods = list_products(active_only=False)
+    if not prods:
+        await callback.message.answer("لا توجد منتجات بعد.", reply_markup=store_admin_keyboard())
+        return
+    lines = ["📋 المنتجات والمخزون:", "━━━━━━━━━━━━━━"]
+    kb = InlineKeyboardBuilder()
+    for pid, d in prods:
+        stock = count_available_codes(pid)
+        active = d.get("active", True)
+        status = "✅" if active else "⛔"
+        lines.append(f"{status} {d.get('name','')} — {d.get('price',0)} ⭐ — المخزون: {stock}")
+        kb.button(text=f"{'⛔ تعطيل' if active else '✅ تفعيل'}: {d.get('name','')}", callback_data=f"st:t:{pid}")
+    kb.adjust(1)
+    await callback.message.answer("\n".join(lines), reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("st:t:"))
+async def cb_st_toggle(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    pid = callback.data.split(":", 2)[2]
+    toggle_product(pid)
+    await callback.answer("تم التحديث ✅", show_alert=False)
 
 @dp.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext):
@@ -496,6 +583,88 @@ async def cb_hist(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     mode = callback.data.split(":", 1)[1]
     await show_history(callback.from_user.id, callback.message, mode)
+
+# ---------------- Store: customer ----------------
+@dp.callback_query(F.data == "shop")
+async def cb_shop(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    prods = list_products(active_only=True)
+    avail = [(pid, d) for pid, d in prods if count_available_codes(pid) > 0]
+    if not avail:
+        await callback.message.answer("🛒 لا توجد منتجات متوفرة حاليًا.")
+        return
+    kb = InlineKeyboardBuilder()
+    for pid, d in avail:
+        kb.button(text=f"{d.get('name','')} — {d.get('price',0)} ⭐", callback_data=f"buy:{pid}")
+    kb.button(text="🔙 القائمة", callback_data="menu")
+    kb.adjust(1)
+    await callback.message.answer("🛒 اختر المنتج للشراء:", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("buy:"))
+async def cb_buy(callback: CallbackQuery):
+    await callback.answer()
+    pid = callback.data.split(":", 1)[1]
+    p = get_product(pid)
+    if not p or not p.get("active", True):
+        await callback.message.answer("المنتج غير متوفر حاليًا.")
+        return
+    if count_available_codes(pid) < 1:
+        await callback.message.answer("نفد المخزون لهذا المنتج.")
+        return
+    try:
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title=p.get("name", "شدات"),
+            description=f"شحن {p.get('name','')} — تسليم فوري بعد الدفع",
+            payload=f"buy:{pid}",
+            currency="XTR",
+            prices=[LabeledPrice(label=p.get("name", "شدات"), amount=int(p.get("price", 1)))],
+        )
+    except Exception as e:
+        logger.exception("send_invoice failed: %s", e)
+        await callback.message.answer("تعذّر إنشاء الفاتورة، حاول لاحقًا.")
+
+@dp.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery):
+    ok = True
+    try:
+        pid = q.invoice_payload.split(":", 1)[1]
+        if count_available_codes(pid) < 1:
+            ok = False
+    except Exception:
+        ok = False
+    if ok:
+        await q.answer(ok=True)
+    else:
+        await q.answer(ok=False, error_message="نفد المخزون، جرّب منتجًا آخر")
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message):
+    sp = message.successful_payment
+    try:
+        pid = sp.invoice_payload.split(":", 1)[1]
+    except Exception:
+        return
+    code = pop_code(pid, message.from_user)
+    if code is None:
+        try:
+            await bot.refund_star_payment(message.from_user.id, sp.telegram_payment_charge_id)
+        except Exception as e:
+            logger.exception("refund failed: %s", e)
+        await message.answer("⚠️ عذرًا، نفد المخزون في آخر لحظة. تم استرجاع النجوم لك.")
+        return
+    p = get_product(pid) or {}
+    save_order(message.from_user, pid, p.get("name", ""), code, sp.total_amount)
+    await message.answer(
+        "✅ تم الشراء بنجاح!\n"
+        f"المنتج: {p.get('name','')}\n"
+        "━━━━━━━━━━━━━━\n"
+        "🔑 كودك:\n"
+        f"{code}\n"
+        "━━━━━━━━━━━━━━\n"
+        "انسخ الكود واستخدمه. شكرًا لك 🌟"
+    )
 
 @dp.message(StateFilter(BattleFSM.my_number))
 async def got_my_number(message: Message, state: FSMContext):
@@ -659,6 +828,135 @@ def save_battle(user, mode, my_number, my_points, opp_number, opp_points,
     bump_counters(mode)
     trim_history(user.id, mode, keep=3)
 
+# ---------------- Store storage ----------------
+def add_product(name: str, price: int):
+    if db is None:
+        return
+    try:
+        db.collection("products").add({
+            "name": name, "price": int(price), "active": True,
+            "created_at": datetime.now(timezone.utc),
+        })
+    except Exception as e:
+        logger.exception("add_product failed: %s", e)
+
+def get_product(pid: str):
+    if db is None:
+        return None
+    try:
+        snap = db.collection("products").document(pid).get()
+        return snap.to_dict() if snap.exists else None
+    except Exception as e:
+        logger.exception("get_product failed: %s", e)
+        return None
+
+def list_products(active_only: bool = True):
+    if db is None:
+        return []
+    try:
+        docs = list(db.collection("products").limit(100).stream())
+        out = []
+        for d in docs:
+            data = d.to_dict()
+            if active_only and not data.get("active", True):
+                continue
+            out.append((d.id, data))
+        out.sort(key=lambda x: x[1].get("price", 0))
+        return out
+    except Exception as e:
+        logger.exception("list_products failed: %s", e)
+        return []
+
+def toggle_product(pid: str):
+    if db is None:
+        return
+    try:
+        ref = db.collection("products").document(pid)
+        snap = ref.get()
+        if snap.exists:
+            cur = snap.to_dict().get("active", True)
+            ref.update({"active": not cur})
+    except Exception as e:
+        logger.exception("toggle_product failed: %s", e)
+
+def add_codes(pid: str, codes: list):
+    if db is None or not codes:
+        return 0
+    try:
+        batch = db.batch()
+        n = 0
+        for c in codes:
+            ref = db.collection("codes").document()
+            batch.set(ref, {
+                "product_id": pid, "code": c, "sold": False,
+                "added_at": datetime.now(timezone.utc),
+            })
+            n += 1
+        batch.commit()
+        return n
+    except Exception as e:
+        logger.exception("add_codes failed: %s", e)
+        return 0
+
+def count_available_codes(pid: str) -> int:
+    if db is None:
+        return 0
+    try:
+        docs = list(db.collection("codes").where("product_id", "==", pid).limit(1000).stream())
+        return sum(1 for d in docs if not d.to_dict().get("sold"))
+    except Exception as e:
+        logger.exception("count_available_codes failed: %s", e)
+        return 0
+
+def pop_code(pid: str, user):
+    if db is None:
+        return None
+    try:
+        docs = list(db.collection("codes").where("product_id", "==", pid).limit(500).stream())
+        for d in docs:
+            if d.to_dict().get("sold"):
+                continue
+            ref = d.reference
+            transaction = db.transaction()
+
+            @firestore.transactional
+            def claim(tx):
+                snap = ref.get(transaction=tx)
+                dd = snap.to_dict()
+                if not dd or dd.get("sold"):
+                    return None
+                tx.update(ref, {
+                    "sold": True,
+                    "buyer_id": user.id,
+                    "sold_at": datetime.now(timezone.utc),
+                })
+                return dd.get("code")
+
+            result = claim(transaction)
+            if result is not None:
+                return result
+        return None
+    except Exception as e:
+        logger.exception("pop_code failed: %s", e)
+        return None
+
+def save_order(user, pid, pname, code, stars):
+    if db is None:
+        return
+    try:
+        db.collection("orders").add({
+            "user_id": user.id,
+            "username": user.username,
+            "name": user.full_name,
+            "product_id": pid,
+            "product_name": pname,
+            "code": code,
+            "stars": stars,
+            "ts": datetime.now(timezone.utc),
+        })
+    except Exception as e:
+        logger.exception("save_order failed: %s", e)
+
 async def show_history(user_id: int, target: Message, mode: str):
     label = MODE_LABELS.get(mode, "")
     if db is None:
@@ -716,7 +1014,7 @@ async def _startup_bg() -> None:
         await bot.set_webhook(
             WEBHOOK_URL,
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query", "inline_query", "chosen_inline_result"],
+            allowed_updates=["message", "callback_query", "inline_query", "chosen_inline_result", "pre_checkout_query"],
         )
         logger.info("Webhook set to %s", WEBHOOK_URL)
     except Exception as e:
