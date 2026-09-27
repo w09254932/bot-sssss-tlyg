@@ -754,7 +754,12 @@ async def cb_shop(callback: CallbackQuery, state: FSMContext):
         kb.button(text=f"{d.get('name','')} — {d.get('price',0)} ⭐", callback_data=f"buy:{pid}")
     kb.button(text="🔙 القائمة", callback_data="menu")
     kb.adjust(1)
-    await callback.message.answer("🛒 اختر المنتج للشراء:", reply_markup=kb.as_markup())
+    await callback.message.answer(
+        "🛒 اختر المنتج للشراء\n"
+        "\n"
+        "أكواد شدات فقط",
+        reply_markup=kb.as_markup(),
+    )
 
 async def send_product_invoice(chat_id: int, pid: str, payload: str):
     p = get_product(pid)
@@ -792,7 +797,11 @@ async def cb_buy(callback: CallbackQuery):
     kb.button(text="👤 شراء لصديق", callback_data=f"gift:{pid}")
     kb.adjust(1)
     await callback.message.answer(
-        f"🛒 {p.get('name','')} — {p.get('price',0)} ⭐\nاختر طريقة الشراء:",
+        f"🛒 {p.get('name','')} — {p.get('price',0)} ⭐\n"
+        "━━━━━━━━━━━━━━\n"
+        "اختر طريقة الشراء:\n\n"
+        "🎁 لنفسي: الكود يوصلك أنت.\n"
+        "👤 لصديق: الكود يُرسل لصديقك (تدخل آيديه).",
         reply_markup=kb.as_markup(),
     )
 
