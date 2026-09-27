@@ -189,7 +189,7 @@ def compute_battle(my_number: int, opp_number: int, mode: str):
 def _range_str(t):
     lo, hi, p = t
     hh = "∞" if hi == float("inf") else f"{int(hi):,}"
-    return f"{int(lo):,}–{hh}"
+    return f"{int(lo):,} الى {hh}"
 
 def reverse_calc_text(target: int, mode: str) -> str:
     tiers = TIERS_TEAM if mode == "team" else TIERS_INDIVIDUAL
