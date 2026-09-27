@@ -185,6 +185,46 @@ def compute_battle(my_number: int, opp_number: int, mode: str):
         "opp_result": opp_result,
     }
 
+# ---------------- Reverse calculator ----------------
+def _range_str(t):
+    lo, hi, p = t
+    hh = "∞" if hi == float("inf") else f"{int(hi):,}"
+    return f"{int(lo):,}–{hh}"
+
+def reverse_calc_text(target: int, mode: str) -> str:
+    tiers = TIERS_TEAM if mode == "team" else TIERS_INDIVIDUAL
+    label = MODE_LABELS.get(mode, "")
+    wins = []
+    for a in tiers:
+        for b in tiers:
+            if a[2] >= b[2] and a[2] + b[2] / 2 == target:
+                wins.append((a, b))
+    losses = [t for t in tiers if t[2] / 2 == target]
+    myword = "دعم تيمك" if mode == "team" else "دعمك"
+    oppword = "دعم الخصم"
+    lines = [f"🎯 عشان تطلع بـ {target} نقطة - {label}", "━━━━━━━━━━━━━━"]
+    if not wins and not losses:
+        lines.append("لا توجد تركيبة تعطي هذا العدد بالضبط.")
+        lines.append("جرّب رقمًا قريبًا.")
+        return "\n".join(lines)
+    if wins:
+        lines.append("✅ بالفوز:")
+        for i, (a, b) in enumerate(wins, 1):
+            prefix = f"{i}) " if len(wins) > 1 else ""
+            lines.append(f"{prefix}{myword}: {_range_str(a)} ({a[2]})")
+            lines.append(f"   {oppword}: {_range_str(b)} ({b[2]})")
+            lines.append(f"   = {a[2]} + نصف {b[2]} = {target}")
+    else:
+        lines.append("✅ بالفوز: لا يوجد")
+    lines.append("")
+    if losses:
+        lines.append("❌ بالخسارة:")
+        for t in losses:
+            lines.append(f"{myword}: {_range_str(t)} ({t[2]}) ← نصفها = {target}")
+    else:
+        lines.append("❌ بالخسارة: لا يوجد")
+    return "\n".join(lines)
+
 # ---------------- Help text + keyboards ----------------
 HELP_TEMPLATE = (
     "احسب معركتك في أي محادثة:\n"
@@ -207,10 +247,20 @@ def help_keyboard():
 
 def menu_keyboard():
     kb = InlineKeyboardBuilder()
+    kb.button(text="🎯 كم تبي نقاط؟", callback_data="revcalc")
     kb.button(text="⚔️ معركة الشعبية الفردية", callback_data="battle_individual")
     kb.button(text="🏠 معركة شعبية المنزل", callback_data="battle_home")
     kb.button(text="👥 معركة الشعبية فريق", callback_data="battle_team")
     kb.button(text="🛒 شراء شدات", callback_data="shop")
+    kb.adjust(1, 2, 1, 1)
+    return kb.as_markup()
+
+def reverse_mode_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⚔️ الفردية", callback_data="rev:individual")
+    kb.button(text="🏠 المنزل", callback_data="rev:home")
+    kb.button(text="👥 الفريق", callback_data="rev:team")
+    kb.button(text="🔙 القائمة", callback_data="menu")
     kb.adjust(2, 1, 1)
     return kb.as_markup()
 
@@ -298,6 +348,9 @@ def compute_admin_stats() -> str:
 class BattleFSM(StatesGroup):
     my_number = State()
     opp_number = State()
+
+class ReverseFSM(StatesGroup):
+    points = State()
 
 class AdminFSM(StatesGroup):
     broadcast = State()
@@ -612,6 +665,31 @@ async def cb_hist(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     mode = callback.data.split(":", 1)[1]
     await show_history(callback.from_user.id, callback.message, mode)
+
+@dp.callback_query(F.data == "revcalc")
+async def cb_revcalc(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.answer("🎯 اختر النوع:", reply_markup=reverse_mode_keyboard())
+
+@dp.callback_query(F.data.startswith("rev:"))
+async def cb_rev_mode(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    mode = callback.data.split(":", 1)[1]
+    await state.set_state(ReverseFSM.points)
+    await state.update_data(rev_mode=mode)
+    await callback.message.answer("كم نقطة تبي تطلع فيها؟ أرسل الرقم:", reply_markup=cancel_keyboard())
+
+@dp.message(StateFilter(ReverseFSM.points))
+async def got_rev_points(message: Message, state: FSMContext):
+    target = parse_number(message.text or "")
+    if target is None or target < 1:
+        await message.answer("❌ أرسل رقمًا صحيحًا (1 فأكثر).")
+        return
+    data = await state.get_data()
+    mode = data.get("rev_mode", "individual")
+    await state.clear()
+    await message.answer(reverse_calc_text(target, mode), reply_markup=menu_keyboard())
 
 # ---------------- Store: customer ----------------
 @dp.callback_query(F.data == "shop")
