@@ -247,6 +247,7 @@ def cancel_keyboard():
 def admin_menu_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 الإحصائيات", callback_data="admin:stats")
+    kb.button(text="⭐ رصيد النجوم", callback_data="admin:stars")
     kb.button(text="🛒 إدارة المتجر", callback_data="admin:store")
     kb.button(text="📢 بث رسالة", callback_data="admin:broadcast")
     kb.button(text="🚫 إدارة الحظر", callback_data="admin:ban")
@@ -402,6 +403,34 @@ async def cb_admin_stats(callback: CallbackQuery):
         return
     await callback.answer()
     await callback.message.answer(compute_admin_stats())
+
+@dp.callback_query(F.data == "admin:stars")
+async def cb_admin_stars(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    balance = None
+    try:
+        bal = await bot.get_my_star_balance()
+        balance = getattr(bal, "amount", None)
+    except Exception as e:
+        logger.exception("get_my_star_balance failed: %s", e)
+    earned = 0
+    if db is not None:
+        try:
+            for d in db.collection("orders").limit(10000).stream():
+                earned += int(d.to_dict().get("stars", 0) or 0)
+        except Exception:
+            pass
+    bal_line = f"{balance} ⭐" if balance is not None else "غير متاح الآن"
+    await callback.message.answer(
+        "⭐ رصيد النجوم\n"
+        "━━━━━━━━━━━━━━\n"
+        f"الرصيد الحالي: {bal_line}\n"
+        f"إجمالي المكتسب من المبيعات: {earned} ⭐\n\n"
+        "ℹ️ السحب/التحويل من BotFather بعد ~21 يوم من كل عملية."
+    )
 
 @dp.callback_query(F.data == "admin:broadcast")
 async def cb_admin_broadcast(callback: CallbackQuery, state: FSMContext):
