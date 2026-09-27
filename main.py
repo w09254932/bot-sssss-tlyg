@@ -210,6 +210,8 @@ def reverse_calc_text(target: int, mode: str) -> str:
     if wins:
         lines.append("✅ بالفوز:")
         for i, (a, b) in enumerate(wins, 1):
+            if i > 1:
+                lines.append("")
             prefix = f"{i}) " if len(wins) > 1 else ""
             lines.append(f"{prefix}{myword}: {_range_str(a)} ({a[2]})")
             lines.append(f"   {oppword}: {_range_str(b)} ({b[2]})")
@@ -670,7 +672,13 @@ async def cb_hist(callback: CallbackQuery, state: FSMContext):
 async def cb_revcalc(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
-    await callback.message.answer("🎯 اختر النوع:", reply_markup=reverse_mode_keyboard())
+    await callback.message.answer(
+        "🎯 كم تبي نقاط؟\n"
+        "━━━━━━━━━━━━━━\n"
+        "اختر نوع الحاسبة، ثم أرسل عدد النقاط اللي تبي تطلع فيها،\n"
+        "وبأعطيك الدعم المطلوب لك وللخصم للوصول لها 👇",
+        reply_markup=reverse_mode_keyboard(),
+    )
 
 @dp.callback_query(F.data.startswith("rev:"))
 async def cb_rev_mode(callback: CallbackQuery, state: FSMContext):
