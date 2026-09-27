@@ -607,7 +607,8 @@ async def cb_st_list(callback: CallbackQuery):
         status = "✅" if active else "⛔"
         lines.append(f"{status} {d.get('name','')} — {d.get('price',0)} ⭐ — المخزون: {stock}")
         kb.button(text=f"{'⛔ تعطيل' if active else '✅ تفعيل'}: {d.get('name','')}", callback_data=f"st:t:{pid}")
-    kb.adjust(1)
+        kb.button(text=f"🗑 حذف: {d.get('name','')}", callback_data=f"st:del:{pid}")
+    kb.adjust(2)
     await callback.message.answer("\n".join(lines), reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data.startswith("st:t:"))
@@ -618,6 +619,37 @@ async def cb_st_toggle(callback: CallbackQuery):
     pid = callback.data.split(":", 2)[2]
     toggle_product(pid)
     await callback.answer("تم التحديث ✅", show_alert=False)
+
+@dp.callback_query(F.data.startswith("st:del:"))
+async def cb_st_del(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    pid = callback.data.split(":", 2)[2]
+    p = get_product(pid) or {}
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 نعم احذف نهائيًا", callback_data=f"st:delok:{pid}")
+    kb.button(text="🔙 رجوع", callback_data="admin:store")
+    kb.adjust(1)
+    await callback.message.answer(
+        f"⚠️ حذف المنتج \"{p.get('name','')}\" وكل أكواده نهائيًا؟\nلا يمكن التراجع.",
+        reply_markup=kb.as_markup(),
+    )
+
+@dp.callback_query(F.data.startswith("st:delok:"))
+async def cb_st_delok(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    await callback.answer()
+    pid = callback.data.split(":", 2)[2]
+    name = (get_product(pid) or {}).get("name", "")
+    n = delete_product(pid)
+    await callback.message.answer(
+        f"🗑 تم حذف المنتج \"{name}\" و{n} كود من مخزونه.",
+        reply_markup=store_admin_keyboard(),
+    )
 
 @dp.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext):
@@ -844,7 +876,8 @@ async def on_successful_payment(message: Message):
     pname = p.get("name", "")
     if friend_id:
         gift_msg = (
-            "🎁 وصلك كود هدية!\n"
+            "🎁 وصلك كود هدية من صديقك!\n"
+            f"من: {message.from_user.full_name} (آيدي: {message.from_user.id})\n"
             f"المنتج: {pname}\n"
             "━━━━━━━━━━━━━━\n"
             "🔑 كودك:\n"
@@ -1093,6 +1126,20 @@ def toggle_product(pid: str):
             ref.update({"active": not cur})
     except Exception as e:
         logger.exception("toggle_product failed: %s", e)
+
+def delete_product(pid: str) -> int:
+    if db is None:
+        return 0
+    n = 0
+    try:
+        codes = list(db.collection("codes").where("product_id", "==", pid).limit(2000).stream())
+        for c in codes:
+            c.reference.delete()
+            n += 1
+        db.collection("products").document(pid).delete()
+    except Exception as e:
+        logger.exception("delete_product failed: %s", e)
+    return n
 
 def add_codes(pid: str, codes: list):
     if db is None or not codes:
