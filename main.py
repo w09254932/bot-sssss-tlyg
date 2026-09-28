@@ -27,6 +27,8 @@ from aiohttp import web
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+import monitor
+
 # ---------------- Config ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_HOST = (os.environ.get("WEBHOOK_HOST") or os.environ["RENDER_EXTERNAL_URL"]).rstrip("/")
@@ -306,6 +308,7 @@ def admin_menu_keyboard():
     kb.button(text="🛒 إدارة المتجر", callback_data="admin:store")
     kb.button(text="📢 بث رسالة", callback_data="admin:broadcast")
     kb.button(text="🚫 إدارة الحظر", callback_data="admin:ban")
+    kb.button(text="🔎 مراقبة اليوزرات", callback_data="admin:mon")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1442,6 +1445,7 @@ def main():
     app.router.add_get("/", health)
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
+    monitor.setup_monitor(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
