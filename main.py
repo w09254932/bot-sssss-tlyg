@@ -514,6 +514,44 @@ async def cb_admin_soon(callback: CallbackQuery):
         return
     await callback.answer("🔜 قريبًا — نضيفها بالخطوة الجاية", show_alert=True)
 
+@dp.message(StateFilter(AdminFSM.broadcast), F.from_user.id == ADMIN_ID)
+async def got_broadcast(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("⏳ جاري البث...")
+    sent, failed, total = await do_broadcast(message)
+    await message.answer(
+        "✅ انتهى البث\n"
+        "━━━━━━━━━━━━━━\n"
+        f"👥 إجمالي المستخدمين: {total}\n"
+        f"✅ وصلت: {sent}\n"
+        f"❌ فشلت: {failed}"
+    )
+
+async def do_broadcast(message: Message):
+    sent = failed = total = 0
+    if db is None:
+        return 0, 0, 0
+    try:
+        docs = list(db.collection("users").limit(10000).stream())
+    except Exception as e:
+        logger.exception("broadcast list failed: %s", e)
+        return 0, 0, 0
+    for d in docs:
+        u = d.to_dict()
+        if u.get("banned"):
+            continue
+        uid = u.get("user_id")
+        if not uid:
+            continue
+        total += 1
+        try:
+            await bot.copy_message(chat_id=uid, from_chat_id=message.chat.id, message_id=message.message_id)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+    return sent, failed, total
+
 # ---------------- Admin: Store management ----------------
 @dp.callback_query(F.data == "admin:store")
 async def cb_admin_store(callback: CallbackQuery, state: FSMContext):
