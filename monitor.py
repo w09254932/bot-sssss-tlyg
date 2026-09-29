@@ -642,7 +642,7 @@ async def _activate_bot(token: str, username=None):
         await b.set_webhook(
             f"{_WEBHOOK_HOST}/mon/{token}",
             drop_pending_updates=True,
-            allowed_updates=["message", "my_chat_member"],
+            allowed_updates=["message", "my_chat_member", "callback_query"],
         )
         _logger.info("monitor webhook set for @%s", username)
     except Exception as e:
@@ -750,7 +750,7 @@ async def _got_token(message: Message, state: FSMContext):
         await tmp.set_webhook(
             f"{_WEBHOOK_HOST}/mon/{token}",
             drop_pending_updates=True,
-            allowed_updates=["message", "my_chat_member"],
+            allowed_updates=["message", "my_chat_member", "callback_query"],
         )
     except Exception as e:
         _logger.exception("monitor set_webhook failed: %s", e)
