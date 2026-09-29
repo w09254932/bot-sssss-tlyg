@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # مراقبة تغيير اليوزر/الاسم داخل القروبات — ملف مستقل يُدمج مع main.py
 # - تاريخ آخر 5 أسماء + آخر 5 يوزرات لكل عضو
-# - بحث بالخاص للمالك فقط (بالآيدي أو بيوزر قديم/حالي)
+# - بحث بالخاص للمالك فقط: بالآيدي / باليوزر / بالاسم (قائمة مطابقين) + أزرار
 # - قائمة بيضاء: يشتغل فقط في القروبات التي يضيفه لها المالك، ويغادر غيرها تلقائياً
+# - تأكيد قبل إزالة قروب من المراقبة
 # كل بوت مراقبة له توكن خاص، ويُشغّل على مسار /mon/{token}
 import asyncio
 import html as _html
@@ -41,6 +42,12 @@ class MonAdminFSM(StatesGroup):
     token = State()
 
 
+class MonLookupFSM(StatesGroup):
+    by_id = State()
+    by_uname = State()
+    by_name = State()
+
+
 def _is_owner(uid) -> bool:
     return uid == _ADMIN_ID or uid == OWNER_ID
 
@@ -71,7 +78,7 @@ def _push_hist(lst, value, cap=5):
     return out[:cap]
 
 
-# ================= تخزين الأعضاء + الفهرس =================
+# ================= تخزين الأعضاء + الفهارس =================
 def _load_rec(bot_id, uid):
     if _db is None:
         return None
@@ -121,6 +128,35 @@ def _index_username(bot_id, username, uid):
         })
     except Exception as e:
         _logger.exception("index_username failed: %s", e)
+
+
+def _norm_name(name):
+    return (name or "").strip().lower().replace("/", "_")
+
+
+def _index_name(bot_id, name, uid):
+    if _db is None:
+        return
+    norm = _norm_name(name)
+    if not norm:
+        return
+    try:
+        ref = _db.collection("mon_nindex").document(f"{bot_id}_{norm}")
+        snap = ref.get()
+        ids = []
+        if snap.exists:
+            ids = snap.to_dict().get("user_ids") or []
+        if uid not in ids:
+            ids.append(uid)
+            ids = ids[-50:]
+        ref.set({
+            "bot_id": bot_id,
+            "name": name,
+            "user_ids": ids,
+            "updated_at": _now(),
+        })
+    except Exception as e:
+        _logger.exception("index_name failed: %s", e)
 
 
 # ================= قائمة القروبات المصرّح بها =================
@@ -197,6 +233,7 @@ async def watch_handler(message: Message, bot: Bot):
             _watch_cache[key] = rec
             _save_rec(bot_id, u.id, rec)
             _index_username(bot_id, cur_un, u.id)
+            _index_name(bot_id, cur_name, u.id)
             return
         _watch_cache[key] = rec
 
@@ -222,6 +259,7 @@ async def watch_handler(message: Message, bot: Bot):
             f"إلى: {_html.escape(cur_name) or 'بدون اسم'}"
         )
         rec["names"] = _push_hist(rec.get("names"), cur_name)
+        _index_name(bot_id, cur_name, u.id)
 
     rec["username"] = cur_un
     rec["first"] = cur_first
@@ -272,35 +310,19 @@ async def on_my_member(event: ChatMemberUpdated, bot: Bot):
         _revoke_chat(bot.id, chat.id)
 
 
-# ================= بحث المالك بالخاص =================
-def _lookup(bot_id, q: str) -> str:
+# ================= صياغة النتائج =================
+def _get_watched(bot_id, uid):
     if _db is None:
-        return "التخزين غير مفعّل حاليًا."
-    q = (q or "").strip()
-    uid = None
-    if q.lstrip("-").isdigit():
-        uid = int(q)
-    else:
-        uname = q.lstrip("@").strip().lower()
-        try:
-            snap = _db.collection("mon_uindex").document(f"{bot_id}_{uname}").get()
-            if snap.exists:
-                uid = snap.to_dict().get("user_id")
-        except Exception as e:
-            _logger.exception("uindex lookup failed: %s", e)
-    if uid is None:
-        return (
-            "❌ ما لقيت هذا الشخص.\n"
-            "لازم يكون البوت شافه في قروب مراقَب (أرسل آيدي رقمي أو @يوزر شافه البوت)."
-        )
+        return None
     try:
         snap = _db.collection("watched").document(f"{bot_id}_{uid}").get()
+        return snap.to_dict() if snap.exists else None
     except Exception as e:
-        _logger.exception("watched lookup failed: %s", e)
-        return "⚠️ تعذّر الجلب الآن."
-    if not snap.exists:
-        return "❌ ما لقيت بيانات لهذا الشخص."
-    d = snap.to_dict()
+        _logger.exception("get_watched failed: %s", e)
+        return None
+
+
+def _format_person(d, uid) -> str:
     cur_name = _full_name(d.get("first_name"), d.get("last_name")) or "بدون اسم"
     lines = [
         "🔎 نتيجة البحث",
@@ -328,7 +350,148 @@ def _lookup(bot_id, q: str) -> str:
     return "\n".join(lines)
 
 
-@monitor_dp.message(F.chat.type == "private")
+def _lookup_by_id(bot_id, q) -> str:
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا."
+    q = (q or "").strip()
+    if not q.lstrip("-").isdigit():
+        return "❌ أرسل آيدي رقمي صحيح."
+    uid = int(q)
+    d = _get_watched(bot_id, uid)
+    if not d:
+        return "❌ ما لقيت بيانات لهذا الآيدي (لازم البوت شافه في قروب مراقَب)."
+    return _format_person(d, uid)
+
+
+def _lookup_by_uname(bot_id, q) -> str:
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا."
+    uname = (q or "").lstrip("@").strip().lower()
+    if not uname:
+        return "❌ أرسل يوزر صحيح."
+    try:
+        snap = _db.collection("mon_uindex").document(f"{bot_id}_{uname}").get()
+    except Exception as e:
+        _logger.exception("uindex lookup failed: %s", e)
+        return "⚠️ تعذّر الجلب الآن."
+    if not snap.exists:
+        return "❌ ما لقيت أحد بهذا اليوزر (حتى القديم)."
+    uid = snap.to_dict().get("user_id")
+    d = _get_watched(bot_id, uid)
+    if not d:
+        return "❌ ما لقيت بيانات لهذا الشخص."
+    return _format_person(d, uid)
+
+
+def _lookup_by_name(bot_id, q) -> str:
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا."
+    norm = _norm_name(q)
+    if not norm:
+        return "❌ أرسل اسمًا للبحث."
+    try:
+        snap = _db.collection("mon_nindex").document(f"{bot_id}_{norm}").get()
+    except Exception as e:
+        _logger.exception("nindex lookup failed: %s", e)
+        return "⚠️ تعذّر الجلب الآن."
+    if not snap.exists:
+        return "❌ ما لقيت أحد بهذا الاسم."
+    ids = snap.to_dict().get("user_ids") or []
+    if not ids:
+        return "❌ ما لقيت أحد بهذا الاسم."
+    lines = [f"📛 نتائج الاسم «{_html.escape((q or '').strip())}»: {len(ids)}", "━━━━━━━━━━━━━━"]
+    shown = 0
+    for uid in ids[:10]:
+        d = _get_watched(bot_id, uid)
+        if not d:
+            continue
+        shown += 1
+        cur_name = _full_name(d.get("first_name"), d.get("last_name")) or "بدون اسم"
+        lines.append(f"{shown}. 👤 {_html.escape(cur_name)}")
+        lines.append(f"    🔗 {_uname(d.get('username'))} | 🆔 <code>{uid}</code>")
+    if shown == 0:
+        return "❌ ما لقيت بيانات مطابقة."
+    if len(ids) > 10:
+        lines.append(f"… (عرض 10 من {len(ids)})")
+    lines += ["━━━━━━━━━━━━━━", "للتفاصيل الكاملة أرسل الآيدي."]
+    return "\n".join(lines)
+
+
+# ================= بحث المالك بالخاص =================
+def _mon_search_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔢 بحث بآيدي", callback_data="monq:id")
+    kb.button(text="🔗 بحث بيوزر", callback_data="monq:uname")
+    kb.button(text="📛 بحث بالاسم", callback_data="monq:name")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _mon_search_intro():
+    return (
+        "🔎 بوت المراقبة — بحث المالك\n\n"
+        "اختر نوع البحث، أو أرسل مباشرة:\n"
+        "• آيدي رقمي (بحث بالآيدي)\n"
+        "• @يوزر (بحث باليوزر، حتى قديم)\n"
+        "• اسم (بحث بالاسم — قائمة مطابقين)"
+    )
+
+
+@monitor_dp.callback_query(F.data == "monq:id")
+async def _cbq_by_id(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(MonLookupFSM.by_id)
+    await callback.message.answer("🔢 أرسل الآيدي الرقمي:")
+
+
+@monitor_dp.callback_query(F.data == "monq:uname")
+async def _cbq_by_uname(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(MonLookupFSM.by_uname)
+    await callback.message.answer("🔗 أرسل اليوزر (بدون @ أو معه):")
+
+
+@monitor_dp.callback_query(F.data == "monq:name")
+async def _cbq_by_name(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(MonLookupFSM.by_name)
+    await callback.message.answer("📛 أرسل الاسم للبحث:")
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.by_id), F.chat.type == "private")
+async def _st_by_id(message: Message, state: FSMContext, bot: Bot):
+    if not _is_owner(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(_lookup_by_id(bot.id, message.text or ""), parse_mode="HTML", reply_markup=_mon_search_kb())
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.by_uname), F.chat.type == "private")
+async def _st_by_uname(message: Message, state: FSMContext, bot: Bot):
+    if not _is_owner(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(_lookup_by_uname(bot.id, message.text or ""), parse_mode="HTML", reply_markup=_mon_search_kb())
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.by_name), F.chat.type == "private")
+async def _st_by_name(message: Message, state: FSMContext, bot: Bot):
+    if not _is_owner(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(_lookup_by_name(bot.id, message.text or ""), parse_mode="HTML", reply_markup=_mon_search_kb())
+
+
+@monitor_dp.message(StateFilter(None), F.chat.type == "private")
 async def mon_private(message: Message, bot: Bot):
     u = message.from_user
     if u is None:
@@ -341,15 +504,15 @@ async def mon_private(message: Message, bot: Bot):
         return
     q = (message.text or "").strip()
     if not q or q.startswith("/"):
-        await message.answer(
-            "🔎 بوت المراقبة — بحث المالك\n\n"
-            "أرسل آيدي رقمي أو @يوزر (حتى لو قديم) لأعطيك:\n"
-            "• الاسم الحالي واليوزر الحالي\n"
-            "• آخر 5 أسماء\n"
-            "• آخر 5 يوزرات"
-        )
+        await message.answer(_mon_search_intro(), reply_markup=_mon_search_kb())
         return
-    await message.answer(_lookup(bot.id, q), parse_mode="HTML")
+    if q.lstrip("-").isdigit():
+        res = _lookup_by_id(bot.id, q)
+    elif q.startswith("@"):
+        res = _lookup_by_uname(bot.id, q)
+    else:
+        res = _lookup_by_name(bot.id, q)
+    await message.answer(res, parse_mode="HTML", reply_markup=_mon_search_kb())
 
 
 # ================= ويبهوك بوتات المراقبة =================
@@ -603,6 +766,33 @@ async def _cb_mon_delchat(callback: CallbackQuery, state: FSMContext):
         return
     await callback.answer()
     parts = callback.data.split(":")  # mon:dc:{bot_id}:{chat_id}
+    bid, cid = parts[2], parts[3]
+    title = cid
+    if _db is not None:
+        try:
+            snap = _db.collection("mon_chats").document(f"{bid}_{cid}").get()
+            if snap.exists:
+                title = snap.to_dict().get("title") or cid
+        except Exception:
+            pass
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 نعم، أزلها", callback_data=f"mon:dcok:{bid}:{cid}")
+    kb.button(text="🔙 لا، رجوع", callback_data="mon:chats")
+    kb.adjust(1)
+    await callback.message.answer(
+        f"⚠️ متأكد تبي تزيل «{title}» من المراقبة؟\n"
+        "البوت بيغادر القروب ويوقف مراقبته.\n"
+        "(تاريخ الأسماء واليوزرات ما ينحذف)",
+        reply_markup=kb.as_markup(),
+    )
+
+
+async def _cb_mon_delchat_ok(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    parts = callback.data.split(":")  # mon:dcok:{bot_id}:{chat_id}
     try:
         bid = int(parts[2])
         cid = int(parts[3])
@@ -639,6 +829,7 @@ def _register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_mon_dellist, F.data == "mon:dellist")
     dp.callback_query.register(_cb_mon_del, F.data.startswith("mon:del:"))
     dp.callback_query.register(_cb_mon_chats, F.data == "mon:chats")
+    dp.callback_query.register(_cb_mon_delchat_ok, F.data.startswith("mon:dcok:"))
     dp.callback_query.register(_cb_mon_delchat, F.data.startswith("mon:dc:"))
     dp.callback_query.register(_cb_mon_back, F.data == "mon:back")
     dp.message.register(_got_token, StateFilter(MonAdminFSM.token), F.from_user.id == _ADMIN_ID)
