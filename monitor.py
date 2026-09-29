@@ -47,6 +47,7 @@ class MonLookupFSM(StatesGroup):
     by_id = State()
     by_uname = State()
     by_name = State()
+    add_id = State()
 
 
 def _is_owner(uid) -> bool:
@@ -454,6 +455,7 @@ def _mon_search_kb():
     kb.button(text="🔢 بحث بآيدي", callback_data="monq:id")
     kb.button(text="🔗 بحث بيوزر", callback_data="monq:uname")
     kb.button(text="📛 بحث بالاسم", callback_data="monq:name")
+    kb.button(text="➕ إضافة بالآيدي", callback_data="monq:add")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -464,8 +466,43 @@ def _mon_search_intro():
         "اختر نوع البحث، أو أرسل مباشرة:\n"
         "• آيدي رقمي (بحث بالآيدي)\n"
         "• @يوزر (بحث باليوزر، حتى قديم)\n"
-        "• اسم (بحث بالاسم — قائمة مطابقين)"
+        "• اسم (بحث بالاسم — قائمة مطابقين)\n\n"
+        "➕ إضافة بالآيدي: يجلب اليوزر والاسم تلقائياً ويحفظهم."
     )
+
+
+async def _add_by_id(bot: Bot, uid: int) -> str:
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا."
+    try:
+        chat = await bot.get_chat(uid)
+    except Exception as e:
+        _logger.exception("add_by_id get_chat failed: %s", e)
+        return (
+            "❌ ما قدرت أجيب بيانات هذا الآيدي.\n"
+            "لازم يكون الشخص شارك قروب مع بوت المراقبة أو فتح البوت.\n"
+            "تأكد من الآيدي وحاول مرة ثانية."
+        )
+    username = getattr(chat, "username", None)
+    first = getattr(chat, "first_name", "") or ""
+    last = getattr(chat, "last_name", "") or ""
+    name = _full_name(first, last)
+    bot_id = bot.id
+    rec = _load_rec(bot_id, uid) or {
+        "username": None, "first": "", "last": "", "names": [], "unames": [],
+    }
+    if not rec.get("names") or _full_name(rec.get("first"), rec.get("last")) != name:
+        rec["names"] = _push_hist(rec.get("names"), name)
+    if not rec.get("unames") or rec.get("username") != username:
+        rec["unames"] = _push_hist(rec.get("unames"), username)
+    rec["username"] = username
+    rec["first"] = first
+    rec["last"] = last
+    _save_rec(bot_id, uid, rec)
+    _watch_cache[(bot_id, uid)] = rec
+    _index_username(bot_id, username, uid)
+    _index_name(bot_id, name, uid)
+    return "✅ تمت الإضافة:\n" + _format_person(_get_watched(bot_id, uid) or {}, uid)
 
 
 @monitor_dp.callback_query(F.data == "monq:id")
@@ -496,6 +533,29 @@ async def _cbq_by_name(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(MonLookupFSM.by_name)
     await callback.message.answer("📛 أرسل الاسم للبحث:")
+
+
+@monitor_dp.callback_query(F.data == "monq:add")
+async def _cbq_add_id(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(MonLookupFSM.add_id)
+    await callback.message.answer("➕ أرسل آيدي الشخص لإضافته (يجلب اليوزر والاسم تلقائياً):")
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.add_id), F.chat.type == "private")
+async def _st_add_id(message: Message, state: FSMContext, bot: Bot):
+    if not _is_owner(message.from_user.id):
+        return
+    await state.clear()
+    q = (message.text or "").strip()
+    if not q.lstrip("-").isdigit():
+        await message.answer("❌ أرسل آيدي رقمي صحيح.", reply_markup=_mon_search_kb())
+        return
+    result = await _add_by_id(bot, int(q))
+    await message.answer(result, parse_mode="HTML", reply_markup=_mon_search_kb())
 
 
 @monitor_dp.message(StateFilter(MonLookupFSM.by_id), F.chat.type == "private")
