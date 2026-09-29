@@ -34,6 +34,7 @@ MONITOR_BOTS = {}      # token -> Bot
 BOT_INFO = {}          # token -> {"id": int, "username": str}
 _watch_cache = {}      # (bot_id, user_id) -> rec dict
 _allowed_chats = {}    # bot_id -> set(chat_id)
+_silent_chats = {}     # bot_id -> set(chat_id) في وضع صامت (يراقب بدون تنبيهات)
 
 monitor_dp = Dispatcher()   # ديسباتشر واحد يخدم كل بوتات المراقبة
 
@@ -180,12 +181,37 @@ def _revoke_chat(bot_id, chat_id):
     s = _allowed_chats.get(bot_id)
     if s and chat_id in s:
         s.discard(chat_id)
+    ss = _silent_chats.get(bot_id)
+    if ss and chat_id in ss:
+        ss.discard(chat_id)
     if _db is None:
         return
     try:
         _db.collection("mon_chats").document(f"{bot_id}_{chat_id}").delete()
     except Exception:
         pass
+
+
+def _is_silent(bot_id, chat_id) -> bool:
+    return chat_id in _silent_chats.get(bot_id, set())
+
+
+def _set_silent(bot_id, chat_id, silent):
+    s = _silent_chats.setdefault(bot_id, set())
+    if silent:
+        s.add(chat_id)
+    else:
+        s.discard(chat_id)
+    if _db is None:
+        return
+    try:
+        ref = _db.collection("mon_chats").document(f"{bot_id}_{chat_id}")
+        snap = ref.get()
+        data = snap.to_dict() if snap.exists else {"bot_id": bot_id, "chat_id": chat_id}
+        data["silent"] = bool(silent)
+        ref.set(data)
+    except Exception as e:
+        _logger.exception("set_silent failed: %s", e)
 
 
 def _load_allowed_chats():
@@ -198,6 +224,8 @@ def _load_allowed_chats():
             cid = rec.get("chat_id")
             if bid is not None and cid is not None:
                 _allowed_chats.setdefault(bid, set()).add(cid)
+                if rec.get("silent"):
+                    _silent_chats.setdefault(bid, set()).add(cid)
     except Exception as e:
         _logger.exception("load_allowed_chats failed: %s", e)
 
@@ -266,6 +294,9 @@ async def watch_handler(message: Message, bot: Bot):
     rec["last"] = cur_last
     _watch_cache[key] = rec
     _save_rec(bot_id, u.id, rec)
+
+    if _is_silent(bot_id, chat_id):
+        return  # وضع صامت — سجّلنا التاريخ بدون تنبيه
 
     for text in announcements:
         try:
@@ -729,14 +760,10 @@ async def _cb_mon_del(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(f"✅ تم حذف @{un} وإيقاف مراقبته.", reply_markup=_mon_menu_kb())
 
 
-async def _cb_mon_chats(callback: CallbackQuery, state: FSMContext):
-    if not _is_owner(callback.from_user.id):
-        await callback.answer()
-        return
-    await callback.answer()
+def _build_chats_view():
+    # يرجّع (text, markup) أو (None, None) إذا ما فيه قروبات
     if _db is None:
-        await callback.message.answer("التخزين غير مفعّل.", reply_markup=_mon_menu_kb())
-        return
+        return None, None
     rows = []
     try:
         for d in _db.collection("mon_chats").limit(1000).stream():
@@ -744,20 +771,62 @@ async def _cb_mon_chats(callback: CallbackQuery, state: FSMContext):
     except Exception as e:
         _logger.exception("list chats failed: %s", e)
     if not rows:
+        return None, None
+    kb = InlineKeyboardBuilder()
+    lines = ["📋 القروبات المراقَبة:", "🔔 = يكتب التنبيهات | 🤫 = صامت", ""]
+    for i, r in enumerate(rows, 1):
+        title = r.get("title") or str(r.get("chat_id"))
+        bid = r.get("bot_id")
+        cid = r.get("chat_id")
+        mode = "🤫" if r.get("silent") else "🔔"
+        lines.append(f"{i}. {mode} {title}")
+        kb.button(text=f"{mode} {title}", callback_data=f"mon:sil:{bid}:{cid}")
+        kb.button(text="🗑", callback_data=f"mon:dc:{bid}:{cid}")
+    kb.button(text="🔙 رجوع", callback_data="admin:mon")
+    kb.adjust(2)
+    return "\n".join(lines), kb.as_markup()
+
+
+async def _cb_mon_chats(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    text, markup = _build_chats_view()
+    if text is None:
         await callback.message.answer(
             "لا توجد قروبات مراقَبة بعد.\nأضف أنت بوت المراقبة لقروبك ليُعتمد تلقائياً.",
             reply_markup=_mon_menu_kb(),
         )
         return
-    kb = InlineKeyboardBuilder()
-    lines = ["📋 القروبات المراقَبة:", ""]
-    for i, r in enumerate(rows, 1):
-        title = r.get("title") or str(r.get("chat_id"))
-        lines.append(f"{i}. {title}")
-        kb.button(text=f"🗑 {title}", callback_data=f"mon:dc:{r.get('bot_id')}:{r.get('chat_id')}")
-    kb.button(text="🔙 رجوع", callback_data="admin:mon")
-    kb.adjust(1)
-    await callback.message.answer("\n".join(lines), reply_markup=kb.as_markup())
+    await callback.message.answer(text, reply_markup=markup)
+
+
+async def _cb_mon_silent(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    parts = callback.data.split(":")  # mon:sil:{bot_id}:{chat_id}
+    try:
+        bid = int(parts[2])
+        cid = int(parts[3])
+    except Exception:
+        await callback.answer()
+        return
+    new_silent = not _is_silent(bid, cid)
+    _set_silent(bid, cid, new_silent)
+    await callback.answer("🤫 صار صامت" if new_silent else "🔔 صار يكتب التنبيهات")
+    text, markup = _build_chats_view()
+    if text is None:
+        try:
+            await callback.message.edit_text("لا توجد قروبات مراقَبة.", reply_markup=_mon_menu_kb())
+        except Exception:
+            pass
+        return
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)
+    except Exception:
+        await callback.message.answer(text, reply_markup=markup)
 
 
 async def _cb_mon_delchat(callback: CallbackQuery, state: FSMContext):
@@ -829,6 +898,7 @@ def _register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_mon_dellist, F.data == "mon:dellist")
     dp.callback_query.register(_cb_mon_del, F.data.startswith("mon:del:"))
     dp.callback_query.register(_cb_mon_chats, F.data == "mon:chats")
+    dp.callback_query.register(_cb_mon_silent, F.data.startswith("mon:sil:"))
     dp.callback_query.register(_cb_mon_delchat_ok, F.data.startswith("mon:dcok:"))
     dp.callback_query.register(_cb_mon_delchat, F.data.startswith("mon:dc:"))
     dp.callback_query.register(_cb_mon_back, F.data == "mon:back")
