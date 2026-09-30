@@ -7,6 +7,8 @@
 # كل بوت مراقبة له توكن خاص، ويُشغّل على مسار /mon/{token}
 import asyncio
 import html as _html
+import time
+import traceback
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F
@@ -35,6 +37,7 @@ BOT_INFO = {}          # token -> {"id": int, "username": str}
 _watch_cache = {}      # (bot_id, user_id) -> rec dict
 _allowed_chats = {}    # bot_id -> set(chat_id)
 _silent_chats = {}     # bot_id -> set(chat_id) في وضع صامت (يراقب بدون تنبيهات)
+_last_err = {}         # توقيع الخطأ -> آخر وقت أُرسل فيه (throttle)
 
 monitor_dp = Dispatcher()   # ديسباتشر واحد يخدم كل بوتات المراقبة
 
@@ -709,6 +712,49 @@ async def _mon_webhook(request: web.Request):
     return web.Response(text="ok")
 
 
+# ================= معالجة الأخطاء الموحّدة =================
+@monitor_dp.errors()
+async def _on_error(event):
+    try:
+        exc = getattr(event, "exception", None)
+        etype = type(exc).__name__ if exc else "Error"
+        emsg = str(exc) if exc else ""
+        kind = "?"
+        try:
+            if getattr(event, "update", None) is not None:
+                kind = event.update.event_type
+        except Exception:
+            pass
+        sig = f"{etype}:{kind}"
+        now = time.monotonic()
+        if now - _last_err.get(sig, 0) < 60:
+            return True  # نفس الخطأ تكرر بأقل من دقيقة — لا نكرر التنبيه
+        _last_err[sig] = now
+        tail = ""
+        try:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            lines = [ln for ln in tb.strip().splitlines() if ln.strip()]
+            tail = "\n".join(lines[-3:])
+        except Exception:
+            pass
+        text = (
+            "🚨 خطأ في البوت\n"
+            f"المكان: {kind}\n"
+            f"النوع: {etype}\n"
+            f"الرسالة: {emsg[:300]}\n"
+            "─────\n"
+            f"{tail[:700]}"
+        )
+        if _bot is not None and _ADMIN_ID:
+            try:
+                await _bot.send_message(_ADMIN_ID, text)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return True
+
+
 # ================= تفعيل/تحميل بوتات المراقبة =================
 async def _activate_bot(token: str, username=None):
     if token in MONITOR_BOTS:
@@ -1041,6 +1087,7 @@ def _register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_mon_delchat, F.data.startswith("mon:dc:"))
     dp.callback_query.register(_cb_mon_back, F.data == "mon:back")
     dp.message.register(_got_token, StateFilter(MonAdminFSM.token), F.from_user.id == _ADMIN_ID)
+    dp.errors.register(_on_error)
 
 
 # ================= نقطة الدخول =================
