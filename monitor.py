@@ -48,6 +48,9 @@ class MonLookupFSM(StatesGroup):
     by_uname = State()
     by_name = State()
     add_id = State()
+    man_id = State()
+    man_uname = State()
+    man_name = State()
 
 
 def _is_owner(uid) -> bool:
@@ -456,6 +459,7 @@ def _mon_search_kb():
     kb.button(text="🔗 بحث بيوزر", callback_data="monq:uname")
     kb.button(text="📛 بحث بالاسم", callback_data="monq:name")
     kb.button(text="➕ إضافة بالآيدي", callback_data="monq:add")
+    kb.button(text="✍️ إضافة يدوية", callback_data="monq:man")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -467,7 +471,8 @@ def _mon_search_intro():
         "• آيدي رقمي (بحث بالآيدي)\n"
         "• @يوزر (بحث باليوزر، حتى قديم)\n"
         "• اسم (بحث بالاسم — قائمة مطابقين)\n\n"
-        "➕ إضافة بالآيدي: يجلب اليوزر والاسم تلقائياً ويحفظهم."
+        "➕ إضافة بالآيدي: يجلب اليوزر والاسم تلقائياً ويحفظهم.\n"
+        "✍️ إضافة يدوية: تكتب الآيدي واليوزر والاسم بنفسك."
     )
 
 
@@ -503,6 +508,28 @@ async def _add_by_id(bot: Bot, uid: int) -> str:
     _index_username(bot_id, username, uid)
     _index_name(bot_id, name, uid)
     return "✅ تمت الإضافة:\n" + _format_person(_get_watched(bot_id, uid) or {}, uid)
+
+
+def _manual_add(bot_id, uid, username, name) -> str:
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا."
+    username = (username or "").lstrip("@").strip() or None
+    name = (name or "").strip()
+    rec = _load_rec(bot_id, uid) or {
+        "username": None, "first": "", "last": "", "names": [], "unames": [],
+    }
+    if name and (not rec.get("names") or _full_name(rec.get("first"), rec.get("last")) != name):
+        rec["names"] = _push_hist(rec.get("names"), name)
+    if not rec.get("unames") or rec.get("username") != username:
+        rec["unames"] = _push_hist(rec.get("unames"), username)
+    rec["username"] = username
+    rec["first"] = name
+    rec["last"] = ""
+    _save_rec(bot_id, uid, rec)
+    _watch_cache[(bot_id, uid)] = rec
+    _index_username(bot_id, username, uid)
+    _index_name(bot_id, name, uid)
+    return "✅ تمت الإضافة اليدوية:\n" + _format_person(_get_watched(bot_id, uid) or {}, uid)
 
 
 @monitor_dp.callback_query(F.data == "monq:id")
@@ -556,6 +583,57 @@ async def _st_add_id(message: Message, state: FSMContext, bot: Bot):
         return
     result = await _add_by_id(bot, int(q))
     await message.answer(result, parse_mode="HTML", reply_markup=_mon_search_kb())
+
+
+@monitor_dp.callback_query(F.data == "monq:man")
+async def _cbq_manual(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(MonLookupFSM.man_id)
+    await callback.message.answer("✍️ إضافة يدوية\nأرسل الآيدي الرقمي:")
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.man_id), F.chat.type == "private")
+async def _st_man_id(message: Message, state: FSMContext):
+    if not _is_owner(message.from_user.id):
+        return
+    q = (message.text or "").strip()
+    if not q.lstrip("-").isdigit():
+        await message.answer("❌ أرسل آيدي رقمي صحيح (أو /cancel).")
+        return
+    await state.update_data(man_id=int(q))
+    await state.set_state(MonLookupFSM.man_uname)
+    await message.answer("أرسل اليوزر (بدون @)، أو أرسل - إذا بدون يوزر:")
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.man_uname), F.chat.type == "private")
+async def _st_man_uname(message: Message, state: FSMContext):
+    if not _is_owner(message.from_user.id):
+        return
+    un = (message.text or "").strip()
+    if un in ("-", "لا", "بدون", ""):
+        un = None
+    await state.update_data(man_uname=un)
+    await state.set_state(MonLookupFSM.man_name)
+    await message.answer("أرسل الاسم:")
+
+
+@monitor_dp.message(StateFilter(MonLookupFSM.man_name), F.chat.type == "private")
+async def _st_man_name(message: Message, state: FSMContext, bot: Bot):
+    if not _is_owner(message.from_user.id):
+        return
+    name = (message.text or "").strip()
+    data = await state.get_data()
+    await state.clear()
+    uid = data.get("man_id")
+    un = data.get("man_uname")
+    if uid is None:
+        await message.answer("❌ صار خطأ، ابدأ من جديد.", reply_markup=_mon_search_kb())
+        return
+    res = _manual_add(bot.id, uid, un, name)
+    await message.answer(res, parse_mode="HTML", reply_markup=_mon_search_kb())
 
 
 @monitor_dp.message(StateFilter(MonLookupFSM.by_id), F.chat.type == "private")
