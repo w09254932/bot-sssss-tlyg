@@ -38,6 +38,8 @@ _watch_cache = {}      # (bot_id, user_id) -> rec dict
 _allowed_chats = {}    # bot_id -> set(chat_id)
 _silent_chats = {}     # bot_id -> set(chat_id) في وضع صامت (يراقب بدون تنبيهات)
 _last_err = {}         # توقيع الخطأ -> آخر وقت أُرسل فيه (throttle)
+_rate_cb = {}          # user_id -> آخر وقت ضغط زر (حد المعدّل)
+_RATE_WINDOW = 0.5     # ثانية — أقل من كذا بين ضغطتين = يتجاهل
 
 monitor_dp = Dispatcher()   # ديسباتشر واحد يخدم كل بوتات المراقبة
 
@@ -712,6 +714,20 @@ async def _mon_webhook(request: web.Request):
     return web.Response(text="ok")
 
 
+# ================= حد المعدّل (منع سبام الأزرار) =================
+async def _throttle_cb(handler, event, data):
+    uid = event.from_user.id if getattr(event, "from_user", None) else 0
+    now = time.monotonic()
+    if now - _rate_cb.get(uid, 0) < _RATE_WINDOW:
+        try:
+            await event.answer()  # يوقف علامة التحميل بدون تنفيذ
+        except Exception:
+            pass
+        return  # تجاهل الضغطة المتكررة
+    _rate_cb[uid] = now
+    return await handler(event, data)
+
+
 # ================= معالجة الأخطاء الموحّدة =================
 @monitor_dp.errors()
 async def _on_error(event):
@@ -1102,6 +1118,8 @@ def setup_monitor(app, dp, bot, db, admin_id, webhook_host, logger, admin_menu_m
     _admin_menu_markup = admin_menu_markup
 
     _register_admin_handlers(dp)
+    monitor_dp.callback_query.outer_middleware(_throttle_cb)
+    dp.callback_query.outer_middleware(_throttle_cb)
     app.router.add_post("/mon/{token}", _mon_webhook)
     dp.startup.register(_mon_startup)
     logger.info("monitor module ready")
