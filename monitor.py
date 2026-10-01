@@ -10,7 +10,7 @@ import html as _html
 import os
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import StateFilter
@@ -787,7 +787,8 @@ async def _on_error(event):
             pass
         sig = f"{etype}:{kind}"
         now = time.monotonic()
-        if now - _last_err.get(sig, 0) < 60:
+        last = _last_err.get(sig)
+        if last is not None and now - last < 60:
             return True  # نفس الخطأ تكرر بأقل من دقيقة — لا نكرر التنبيه
         _last_err[sig] = now
         tail = ""
@@ -835,33 +836,101 @@ async def _activate_bot(token: str, username=None):
 
 
 async def _mon_startup_bg():
-    if _db is None:
+    if _db is not None:
+        _load_allowed_chats()
+        try:
+            docs = list(_db.collection("monitor_bots").limit(500).stream())
+        except Exception as e:
+            _logger.exception("monitor load failed: %s", e)
+            docs = []
+        for d in docs:
+            rec = d.to_dict()
+            raw = rec.get("token")
+            token = _dec(raw)
+            if not token:
+                continue
+            # ترحيل: لو التوكن مخزّن نص صريح والمفتاح متوفر، نعيد حفظه مشفّراً
+            if _fernet is not None and isinstance(raw, str) and not raw.startswith("enc:"):
+                try:
+                    _db.collection("monitor_bots").document(str(rec.get("bot_id"))).set(
+                        {"token": _enc(token)}, merge=True
+                    )
+                except Exception:
+                    pass
+            await _activate_bot(token, rec.get("username"))
+    await _startup_ping()
+
+
+async def _startup_ping():
+    if _bot is None or not _ADMIN_ID:
         return
-    _load_allowed_chats()
     try:
-        docs = list(_db.collection("monitor_bots").limit(500).stream())
-    except Exception as e:
-        _logger.exception("monitor load failed: %s", e)
-        return
-    for d in docs:
-        rec = d.to_dict()
-        raw = rec.get("token")
-        token = _dec(raw)
-        if not token:
+        riyadh = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+        txt = (
+            "✅ البوت يعمل الآن\n"
+            f"🔒 التشفير: {'مفعّل' if _fernet is not None else 'غير مفعّل'}\n"
+            f"🔎 بوتات المراقبة: {len(MONITOR_BOTS)}\n"
+            f"🕐 {riyadh} (الرياض)"
+        )
+        await _bot.send_message(_ADMIN_ID, txt)
+    except Exception:
+        pass
+
+
+async def _health_check_once():
+    targets = [("الرئيسي", _bot)]
+    for t, b in list(MONITOR_BOTS.items()):
+        un = (BOT_INFO.get(t, {}) or {}).get("username") or "?"
+        targets.append((f"@{un}", b))
+    for label, b in targets:
+        if b is None:
             continue
-        # ترحيل: لو التوكن مخزّن نص صريح والمفتاح متوفر، نعيد حفظه مشفّراً
-        if _fernet is not None and isinstance(raw, str) and not raw.startswith("enc:"):
-            try:
-                _db.collection("monitor_bots").document(str(rec.get("bot_id"))).set(
-                    {"token": _enc(token)}, merge=True
-                )
-            except Exception:
-                pass
-        await _activate_bot(token, rec.get("username"))
+        try:
+            info = await b.get_webhook_info()
+        except Exception:
+            continue
+        pending = getattr(info, "pending_update_count", 0) or 0
+        err = getattr(info, "last_error_message", None)
+        problems = []
+        if err:
+            problems.append(f"خطأ توصيل: {err}")
+        if pending > 50:
+            problems.append(f"تحديثات معلّقة: {pending}")
+        if not problems:
+            continue
+        sig = f"health:{label}"
+        now = time.monotonic()
+        last = _last_err.get(sig)
+        if last is not None and now - last < 1800:  # تنبيه مرة كل 30 دقيقة لكل بوت
+            continue
+        _last_err[sig] = now
+        try:
+            if _bot is not None and _ADMIN_ID:
+                await _bot.send_message(_ADMIN_ID, f"⚠️ صحة البوت ({label})\n" + "\n".join(problems))
+        except Exception:
+            pass
+
+
+async def _health_loop():
+    while True:
+        await asyncio.sleep(600)  # كل 10 دقائق
+        try:
+            await _health_check_once()
+        except Exception:
+            pass
+
+
+async def _health_endpoint(request):
+    return web.json_response({
+        "ok": True,
+        "monitor_bots": len(MONITOR_BOTS),
+        "encryption": _fernet is not None,
+    })
 
 
 async def _mon_startup():
     asyncio.create_task(_mon_startup_bg())
+    asyncio.create_task(_health_loop())
 
 
 # ================= لوحة المالك: أزرار المراقبة =================
@@ -1176,5 +1245,6 @@ def setup_monitor(app, dp, bot, db, admin_id, webhook_host, logger, admin_menu_m
     monitor_dp.callback_query.outer_middleware(_throttle_cb)
     dp.callback_query.outer_middleware(_throttle_cb)
     app.router.add_post("/mon/{token}", _mon_webhook)
+    app.router.add_get("/mon_health", _health_endpoint)
     dp.startup.register(_mon_startup)
     logger.info("monitor module ready")
