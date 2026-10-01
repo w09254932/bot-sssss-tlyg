@@ -7,6 +7,7 @@
 # كل بوت مراقبة له توكن خاص، ويُشغّل على مسار /mon/{token}
 import asyncio
 import html as _html
+import os
 import time
 import traceback
 from datetime import datetime, timezone
@@ -86,6 +87,49 @@ def _push_hist(lst, value, cap=5):
     out = list(lst or [])
     out.insert(0, {"v": value, "at": _now().isoformat()})
     return out[:cap]
+
+
+# ================= تشفير التوكنات =================
+_fernet = None
+
+
+def _init_crypto():
+    global _fernet
+    key = os.environ.get("MON_KEY")
+    if not key:
+        _fernet = None
+        return
+    try:
+        from cryptography.fernet import Fernet
+        _fernet = Fernet(key.encode() if isinstance(key, str) else key)
+        _logger.info("token encryption enabled")
+    except Exception as e:
+        _logger.exception("crypto init failed: %s", e)
+        _fernet = None
+
+
+def _enc(token):
+    if _fernet is None or not token:
+        return token
+    try:
+        return "enc:" + _fernet.encrypt(token.encode()).decode()
+    except Exception:
+        return token
+
+
+def _dec(stored):
+    if not stored:
+        return stored
+    if isinstance(stored, str) and stored.startswith("enc:"):
+        if _fernet is None:
+            _logger.warning("encrypted token but MON_KEY missing")
+            return None
+        try:
+            return _fernet.decrypt(stored[4:].encode()).decode()
+        except Exception:
+            _logger.exception("token decrypt failed")
+            return None
+    return stored
 
 
 # ================= تخزين الأعضاء + الفهارس =================
@@ -801,9 +845,19 @@ async def _mon_startup_bg():
         return
     for d in docs:
         rec = d.to_dict()
-        token = rec.get("token")
-        if token:
-            await _activate_bot(token, rec.get("username"))
+        raw = rec.get("token")
+        token = _dec(raw)
+        if not token:
+            continue
+        # ترحيل: لو التوكن مخزّن نص صريح والمفتاح متوفر، نعيد حفظه مشفّراً
+        if _fernet is not None and isinstance(raw, str) and not raw.startswith("enc:"):
+            try:
+                _db.collection("monitor_bots").document(str(rec.get("bot_id"))).set(
+                    {"token": _enc(token)}, merge=True
+                )
+            except Exception:
+                pass
+        await _activate_bot(token, rec.get("username"))
 
 
 async def _mon_startup():
@@ -877,7 +931,7 @@ async def _got_token(message: Message, state: FSMContext):
     if _db is not None:
         try:
             _db.collection("monitor_bots").document(str(me.id)).set({
-                "token": token,
+                "token": _enc(token),
                 "username": me.username,
                 "bot_id": me.id,
                 "added_at": _now(),
@@ -1117,6 +1171,7 @@ def setup_monitor(app, dp, bot, db, admin_id, webhook_host, logger, admin_menu_m
     _logger = logger
     _admin_menu_markup = admin_menu_markup
 
+    _init_crypto()
     _register_admin_handlers(dp)
     monitor_dp.callback_query.outer_middleware(_throttle_cb)
     dp.callback_query.outer_middleware(_throttle_cb)
