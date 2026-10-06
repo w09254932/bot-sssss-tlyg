@@ -504,11 +504,70 @@ def _lookup_by_name(bot_id, q) -> str:
 
 
 # ================= بحث المالك بالخاص =================
+_ALL_PAGE = 15
+
+
+def _all_list_kb(page, pages):
+    kb = InlineKeyboardBuilder()
+    nav = 0
+    if page > 0:
+        kb.button(text="◀️ السابق", callback_data=f"monall:{page-1}")
+        nav += 1
+    if page < pages - 1:
+        kb.button(text="▶️ التالي", callback_data=f"monall:{page+1}")
+        nav += 1
+    kb.button(text="🔎 رجوع للبحث", callback_data="monq:home")
+    if nav == 2:
+        kb.adjust(2, 1)
+    else:
+        kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def _all_list(bot_id, page):
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا.", None
+    try:
+        docs = list(_db.collection("watched").where("bot_id", "==", bot_id).limit(1000).stream())
+    except Exception as e:
+        _logger.exception("all list failed: %s", e)
+        return "⚠️ تعذّر الجلب الآن.", None
+    rows = []
+    for d in docs:
+        dd = d.to_dict()
+        uid = dd.get("user_id")
+        name = _full_name(dd.get("first_name"), dd.get("last_name")) or "بدون اسم"
+        rows.append((name, uid, dd.get("username")))
+    total = len(rows)
+    if total == 0:
+        return (
+            "📋 كل المخزّنين\n"
+            "━━━━━━━━━━━━━━\n"
+            "ما فيه أعضاء مخزّنين بعد.\n"
+            "ينحفظون تلقائياً أول ما يرسلون رسالة بالقروب المراقَب."
+        ), None
+    rows.sort(key=lambda r: ((r[0] or "").lower(), str(r[1])))
+    pages = (total + _ALL_PAGE - 1) // _ALL_PAGE
+    page = max(0, min(page, pages - 1))
+    start = page * _ALL_PAGE
+    chunk = rows[start:start + _ALL_PAGE]
+    lines = [
+        f"📋 كل المخزّنين — إجمالي: {total}",
+        f"صفحة {page + 1}/{pages}",
+        "━━━━━━━━━━━━━━",
+    ]
+    for i, (name, uid, un) in enumerate(chunk, start + 1):
+        lines.append(f"{i}. {_html.escape(name)}")
+        lines.append(f"    {_uname(un)} | 🆔 <code>{uid}</code>")
+    return "\n".join(lines), _all_list_kb(page, pages)
+
+
 def _mon_search_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="🔢 بحث بآيدي", callback_data="monq:id")
     kb.button(text="🔗 بحث بيوزر", callback_data="monq:uname")
     kb.button(text="📛 بحث بالاسم", callback_data="monq:name")
+    kb.button(text="📋 كل المخزّنين", callback_data="monall:0")
     kb.button(text="➕ إضافة بالآيدي", callback_data="monq:add")
     kb.button(text="✍️ إضافة يدوية", callback_data="monq:man")
     kb.adjust(1)
@@ -611,6 +670,40 @@ async def _cbq_by_name(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(MonLookupFSM.by_name)
     await callback.message.answer("📛 أرسل الاسم للبحث:")
+
+
+@monitor_dp.callback_query(F.data.startswith("monall:"))
+async def _cbq_all(callback: CallbackQuery, bot: Bot):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except Exception:
+        page = 0
+    text, markup = _all_list(bot.id, page)
+    try:
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=markup or _mon_search_kb()
+        )
+    except Exception:
+        await callback.message.answer(
+            text, parse_mode="HTML", reply_markup=markup or _mon_search_kb()
+        )
+
+
+@monitor_dp.callback_query(F.data == "monq:home")
+async def _cbq_home(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await state.clear()
+    await callback.answer()
+    try:
+        await callback.message.edit_text(_mon_search_intro(), reply_markup=_mon_search_kb())
+    except Exception:
+        await callback.message.answer(_mon_search_intro(), reply_markup=_mon_search_kb())
 
 
 @monitor_dp.callback_query(F.data == "monq:add")
