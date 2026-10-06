@@ -329,7 +329,8 @@ async def watch_handler(message: Message, bot: Bot):
         announcements.append(
             f"👀 يا {m}، ليش غيّرت اليوزر؟\n"
             f"من: {_uname(prev_un)}\n"
-            f"إلى: {_uname(cur_un)}"
+            f"إلى: {_uname(cur_un)}\n"
+            f"🆔 {u.id}"
         )
         rec["unames"] = _push_hist(rec.get("unames"), cur_un)
         _index_username(bot_id, cur_un, u.id)
@@ -337,7 +338,8 @@ async def watch_handler(message: Message, bot: Bot):
         announcements.append(
             f"👀 يا {m}، ليش غيّرت اسمك؟\n"
             f"من: {_html.escape(prev_name) or 'بدون اسم'}\n"
-            f"إلى: {_html.escape(cur_name) or 'بدون اسم'}"
+            f"إلى: {_html.escape(cur_name) or 'بدون اسم'}\n"
+            f"🆔 {u.id}"
         )
         rec["names"] = _push_hist(rec.get("names"), cur_name)
         _index_name(bot_id, cur_name, u.id)
