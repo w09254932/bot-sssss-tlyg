@@ -73,6 +73,12 @@ def _uname(v) -> str:
     return f"@{v}" if v else "بدون يوزر"
 
 
+def _uname_link(v, uid) -> str:
+    if not v:
+        return "بدون يوزر"
+    return f'<a href="tg://user?id={uid}">@{_html.escape(str(v))}</a>' 
+
+
 def _full_name(first, last) -> str:
     first = first or ""
     last = last or ""
@@ -328,8 +334,8 @@ async def watch_handler(message: Message, bot: Bot):
     if prev_un != cur_un:
         announcements.append(
             f"👀 يا {m}، ليش غيّرت اليوزر؟\n"
-            f"من: {_uname(prev_un)}\n"
-            f"إلى: {_uname(cur_un)}\n"
+            f"من: {_uname_link(prev_un, u.id)}\n"
+            f"إلى: {_uname_link(cur_un, u.id)}\n"
             f"🆔 {u.id}"
         )
         rec["unames"] = _push_hist(rec.get("unames"), cur_un)
