@@ -309,7 +309,7 @@ def admin_menu_keyboard():
     kb.button(text="📢 بث رسالة", callback_data="admin:broadcast")
     kb.button(text="🚫 إدارة الحظر", callback_data="admin:ban")
     kb.button(text="🔎 مراقبة اليوزرات", callback_data="admin:mon")
-    kb.adjust(1)
+    kb.adjust(2)
     return kb.as_markup()
 
 def store_admin_keyboard():

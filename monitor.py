@@ -152,6 +152,7 @@ def _load_rec(bot_id, uid):
                 "last": d.get("last_name") or "",
                 "names": d.get("names") or [],
                 "unames": d.get("unames") or [],
+                "chg": d.get("chg"),
             }
     except Exception as e:
         _logger.exception("load_rec failed: %s", e)
@@ -170,6 +171,7 @@ def _save_rec(bot_id, uid, rec):
             "last_name": rec.get("last"),
             "names": rec.get("names") or [],
             "unames": rec.get("unames") or [],
+            "chg": rec.get("chg", 0),
             "updated_at": _now(),
         })
     except Exception as e:
@@ -331,6 +333,8 @@ async def watch_handler(message: Message, bot: Bot):
 
     announcements = []
     m = _mention(u)
+    if rec.get("chg") is None:
+        rec["chg"] = max(0, len(rec.get("names") or []) - 1) + max(0, len(rec.get("unames") or []) - 1)
     if prev_un != cur_un:
         announcements.append(
             f"👀 يا {m}، ليش غيّرت اليوزر؟\n"
@@ -339,6 +343,7 @@ async def watch_handler(message: Message, bot: Bot):
             f"🆔 {u.id}"
         )
         rec["unames"] = _push_hist(rec.get("unames"), cur_un)
+        rec["chg"] = rec.get("chg", 0) + 1
         _index_username(bot_id, cur_un, u.id)
     if prev_name != cur_name:
         announcements.append(
@@ -348,6 +353,7 @@ async def watch_handler(message: Message, bot: Bot):
             f"🆔 {u.id}"
         )
         rec["names"] = _push_hist(rec.get("names"), cur_name)
+        rec["chg"] = rec.get("chg", 0) + 1
         _index_name(bot_id, cur_name, u.id)
 
     rec["username"] = cur_un
@@ -568,15 +574,80 @@ def _all_list(bot_id, page):
     return "\n".join(lines), _all_list_kb(page, pages)
 
 
+_CHG_PAGE = 15
+
+
+def _page_kb(prefix, page, pages):
+    kb = InlineKeyboardBuilder()
+    nav = 0
+    if page > 0:
+        kb.button(text="◀️ السابق", callback_data=f"{prefix}:{page-1}")
+        nav += 1
+    if page < pages - 1:
+        kb.button(text="▶️ التالي", callback_data=f"{prefix}:{page+1}")
+        nav += 1
+    kb.button(text="🔎 رجوع للبحث", callback_data="monq:home")
+    if nav == 2:
+        kb.adjust(2, 1)
+    else:
+        kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def _changed_list(bot_id, page):
+    if _db is None:
+        return "التخزين غير مفعّل حاليًا.", None
+    try:
+        docs = list(_db.collection("watched").where("bot_id", "==", bot_id).limit(1000).stream())
+    except Exception as e:
+        _logger.exception("changed list failed: %s", e)
+        return "⚠️ تعذّر الجلب الآن.", None
+    rows = []
+    for d in docs:
+        dd = d.to_dict()
+        uid = dd.get("user_id")
+        name = _full_name(dd.get("first_name"), dd.get("last_name")) or "بدون اسم"
+        nn = len(dd.get("names") or [])
+        nu = len(dd.get("unames") or [])
+        chg = dd.get("chg")
+        if chg is None:
+            chg = max(0, nn - 1) + max(0, nu - 1)
+        if chg > 0:
+            rows.append((chg, name, uid, dd.get("username")))
+    total = len(rows)
+    if total == 0:
+        return (
+            "🔁 أكثر الأعضاء تغييراً\n"
+            "━━━━━━━━━━━━━━\n"
+            "ما فيه تغييرات مسجّلة بعد.\n"
+            "تُحتسب تلقائياً كل ما غيّر أحد يوزره أو اسمه."
+        ), None
+    rows.sort(key=lambda r: (-r[0], (r[1] or "").lower()))
+    pages = (total + _CHG_PAGE - 1) // _CHG_PAGE
+    page = max(0, min(page, pages - 1))
+    start = page * _CHG_PAGE
+    chunk = rows[start:start + _CHG_PAGE]
+    lines = [
+        f"🔁 أكثر الأعضاء تغييراً — {total}",
+        f"صفحة {page + 1}/{pages}",
+        "━━━━━━━━━━━━━━",
+    ]
+    for i, (chg, name, uid, un) in enumerate(chunk, start + 1):
+        lines.append(f'{i}. <a href="tg://user?id={uid}">{_html.escape(name)}</a> — 🔁 {chg}')
+        lines.append(f"    {_uname(un)} | 🆔 <code>{uid}</code>")
+    return "\n".join(lines), _page_kb("monchg", page, pages)
+
+
 def _mon_search_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="🔢 بحث بآيدي", callback_data="monq:id")
     kb.button(text="🔗 بحث بيوزر", callback_data="monq:uname")
     kb.button(text="📛 بحث بالاسم", callback_data="monq:name")
     kb.button(text="📋 كل المخزّنين", callback_data="monall:0")
+    kb.button(text="🔁 أكثر تغييراً", callback_data="monchg:0")
     kb.button(text="➕ إضافة بالآيدي", callback_data="monq:add")
     kb.button(text="✍️ إضافة يدوية", callback_data="monq:man")
-    kb.adjust(1)
+    kb.adjust(3, 2, 2)
     return kb.as_markup()
 
 
@@ -676,6 +747,27 @@ async def _cbq_by_name(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(MonLookupFSM.by_name)
     await callback.message.answer("📛 أرسل الاسم للبحث:")
+
+
+@monitor_dp.callback_query(F.data.startswith("monchg:"))
+async def _cbq_changed(callback: CallbackQuery, bot: Bot):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except Exception:
+        page = 0
+    text, markup = _changed_list(bot.id, page)
+    try:
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=markup or _mon_search_kb()
+        )
+    except Exception:
+        await callback.message.answer(
+            text, parse_mode="HTML", reply_markup=markup or _mon_search_kb()
+        )
 
 
 @monitor_dp.callback_query(F.data.startswith("monall:"))
@@ -1042,7 +1134,10 @@ def _mon_menu_kb():
         kb.button(text="📋 القروبات المراقَبة", callback_data="mon:chats")
         kb.button(text="🗑 حذف بوت", callback_data="mon:dellist")
     kb.button(text="🔙 رجوع", callback_data="mon:back")
-    kb.adjust(1)
+    if MONITOR_BOTS:
+        kb.adjust(1, 2, 1)
+    else:
+        kb.adjust(1, 1)
     return kb.as_markup()
 
 
