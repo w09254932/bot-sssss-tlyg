@@ -749,8 +749,55 @@ async def _ev_startup_bg():
             await _activate_event_bot(token, rec.get("username"))
 
 
+def _due(schedule_at):
+    if not schedule_at:
+        return False
+    try:
+        dt = datetime.strptime(schedule_at, "%Y-%m-%d %H:%M")
+    except Exception:
+        return False
+    dt_utc = dt.replace(tzinfo=timezone(timedelta(hours=3))).astimezone(timezone.utc)
+    return _now() >= dt_utc
+
+
+async def _sched_check():
+    for token, b in list(EVENT_BOTS.items()):
+        try:
+            bot_id = b.id
+        except Exception:
+            continue
+        if bot_id in ACTIVE and ACTIVE[bot_id].get("running"):
+            continue
+        cfg = _load_cfg(bot_id)
+        if not _due(cfg.get("schedule_at")):
+            continue
+        prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
+        if not cfg.get("group_id") or not prizes:
+            cfg["schedule_at"] = None
+            _save_cfg(bot_id, cfg)
+            continue
+        cfg["schedule_at"] = None
+        _save_cfg(bot_id, cfg)
+        try:
+            if _main_bot is not None and _ADMIN_ID:
+                await _main_bot.send_message(_ADMIN_ID, "▶️ انطلقت الفعالية المجدولة.")
+        except Exception:
+            pass
+        asyncio.create_task(_run_event(b, cfg))
+
+
+async def _sched_loop():
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await _sched_check()
+        except Exception:
+            pass
+
+
 async def _ev_startup():
     asyncio.create_task(_ev_startup_bg())
+    asyncio.create_task(_sched_loop())
 
 
 def setup_event(app, dp, main_bot, db, admin_id, webhook_host, logger):
