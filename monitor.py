@@ -1129,7 +1129,7 @@ async def _mon_startup():
 # ================= لوحة المالك: أزرار المراقبة =================
 def _mon_menu_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ إضافة بوت مراقبة", callback_data="mon:add")
+    kb.button(text="➕ إضافة بوت", callback_data="mon:add")
     if MONITOR_BOTS:
         kb.button(text="📋 القروبات المراقَبة", callback_data="mon:chats")
         kb.button(text="🗑 حذف بوت", callback_data="mon:dellist")
@@ -1138,6 +1138,15 @@ def _mon_menu_kb():
         kb.adjust(1, 2, 1)
     else:
         kb.adjust(1, 1)
+    return kb.as_markup()
+
+
+def _mon_role_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔎 مراقبة اليوزرات", callback_data="monrole:monitor")
+    kb.button(text="🎉 بوت فعالية (قريبًا)", callback_data="monrole:event")
+    kb.button(text="🔙 رجوع", callback_data="mon:back")
+    kb.adjust(2, 1)
     return kb.as_markup()
 
 
@@ -1167,17 +1176,45 @@ async def _cb_mon_add(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     await callback.answer()
-    await state.set_state(MonAdminFSM.token)
+    await state.clear()
     await callback.message.answer(
-        "📥 أرسل الآن توكن البوت الذي تريد استخدامه للمراقبة.\n\n"
+        "🧩 اختر وظيفة البوت الذي تريد إضافته:\n\n"
+        "🔎 مراقبة اليوزرات: يسجّل الأعضاء وينبّه عند تغيير اليوزر/الاسم.\n"
+        "🎉 بوت فعالية: قريبًا.",
+        reply_markup=_mon_role_kb(),
+    )
+
+
+async def _cb_mon_role_monitor(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(MonAdminFSM.token)
+    await state.update_data(role="monitor")
+    await callback.message.answer(
+        "📥 أرسل الآن توكن بوت المراقبة (من @BotFather).\n\n"
         "مثال على شكل التوكن:\n"
         "1234567890:AAExampleTokenHere...\n\n"
-        "⚠️ استخدم توكن بوت خاص بك (من @BotFather).\n"
+        "⚠️ استخدم توكن بوت خاص بك.\n"
         "/cancel للإلغاء"
     )
 
 
+async def _cb_mon_role_event(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer()
+    await callback.message.answer(
+        "🎉 بوت الفعالية قيد التطوير — نفعّله قريبًا.",
+        reply_markup=_mon_menu_kb(),
+    )
+
+
 async def _got_token(message: Message, state: FSMContext):
+    data = await state.get_data()
+    role = data.get("role", "monitor")
     token = (message.text or "").strip()
     await state.clear()
     if ":" not in token or len(token) < 20:
@@ -1199,6 +1236,7 @@ async def _got_token(message: Message, state: FSMContext):
                 "token": _enc(token),
                 "username": me.username,
                 "bot_id": me.id,
+                "features": [role],
                 "added_at": _now(),
             })
         except Exception as e:
@@ -1414,6 +1452,8 @@ async def _cb_mon_back(callback: CallbackQuery, state: FSMContext):
 def _register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_mon_open, F.data == "admin:mon")
     dp.callback_query.register(_cb_mon_add, F.data == "mon:add")
+    dp.callback_query.register(_cb_mon_role_monitor, F.data == "monrole:monitor")
+    dp.callback_query.register(_cb_mon_role_event, F.data == "monrole:event")
     dp.callback_query.register(_cb_mon_dellist, F.data == "mon:dellist")
     dp.callback_query.register(_cb_mon_del, F.data.startswith("mon:del:"))
     dp.callback_query.register(_cb_mon_chats, F.data == "mon:chats")
