@@ -7,13 +7,14 @@
 import asyncio
 import html as _html
 import os
+import random
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import StateFilter, CommandStart
+from aiogram.filters import StateFilter, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Update, Message, CallbackQuery
+from aiogram.types import Update, Message, CallbackQuery, MessageReactionUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 
@@ -30,6 +31,9 @@ EVENT_BOTS = {}        # token -> Bot
 EV_INFO = {}           # token -> {"id":.., "username":..}
 
 event_dp = Dispatcher()
+
+# حالة الفعاليات الجارية (بالذاكرة) — bot_id -> state
+ACTIVE = {}
 
 # افتراضيات الإعدادات
 _DEF_TIMER = 60        # ثانية لكل جولة
@@ -197,10 +201,14 @@ async def _show_panel(message, cfg):
 
 # ---- فتح البوت بالخاص ----
 @event_dp.message(CommandStart())
-async def _ev_start(message: Message, bot: Bot, state: FSMContext):
+async def _ev_start(message: Message, bot: Bot, state: FSMContext, command: CommandObject):
     await state.clear()
     u = message.from_user
     if u is None:
+        return
+    payload = (command.args or "").strip() if command else ""
+    if payload:
+        await _handle_claim(message, bot, payload)
         return
     if not _is_owner(u.id):
         await message.answer("🎉 بوت فعالية. تابع القناة/القروب للمشاركة.")
@@ -258,7 +266,23 @@ async def _cb_startnow(cb: CallbackQuery, bot: Bot):
     if not _is_owner(cb.from_user.id):
         await cb.answer(); return
     await cb.answer()
-    await cb.message.answer("▶️ تشغيل الفعالية — قيد الإنشاء (المرحلة 2).")
+    cfg = _load_cfg(bot.id)
+    problems = []
+    if not cfg.get("channel_id"):
+        problems.append("• عيّن القناة")
+    if not cfg.get("group_id"):
+        problems.append("• عيّن القروب")
+    prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
+    if not prizes:
+        problems.append("• أضف جائزة واحدة على الأقل مع كود")
+    if problems:
+        await cb.message.answer("⚠️ أكمل الإعدادات أولًا:\n" + "\n".join(problems))
+        return
+    if bot.id in ACTIVE and ACTIVE[bot.id].get("running"):
+        await cb.message.answer("⏳ فيه فعالية جارية بالفعل.")
+        return
+    await cb.message.answer("▶️ بدأت الفعالية.")
+    asyncio.create_task(_run_event(bot, cfg))
 
 
 # أزرار تطلب إدخال نصّي → نحفظ أي بوت (bot.id) في الحالة
@@ -466,6 +490,184 @@ async def _ev_private(message: Message, bot: Bot, state: FSMContext):
     await _show_panel(message, _load_cfg(bot.id))
 
 
+# ================= محرّك السحب =================
+async def _bot_username(bot):
+    for t, info in EV_INFO.items():
+        if info.get("id") == bot.id and info.get("username"):
+            return info["username"]
+    try:
+        me = await bot.get_me()
+        return me.username
+    except Exception:
+        return None
+
+
+def _make_claim(bot_id, round_idx, prize, winner_id, winner_name):
+    suffix = "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(6))
+    claim_id = f"{bot_id}_{round_idx}_{suffix}"
+    if _db is not None:
+        try:
+            _db.collection("event_winners").document(claim_id).set({
+                "bot_id": bot_id,
+                "round": round_idx,
+                "prize": prize.get("name"),
+                "code": prize.get("code"),
+                "winner_id": winner_id,
+                "winner_name": winner_name,
+                "claimed": False,
+                "created_at": _now(),
+            })
+        except Exception as e:
+            if _logger:
+                _logger.exception("event winner store failed: %s", e)
+    return claim_id
+
+
+async def _run_event(bot, cfg):
+    bot_id = bot.id
+    group_id = cfg.get("group_id")
+    channel_id = cfg.get("channel_id")
+    prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
+    timer = int(cfg.get("round_timer", _DEF_TIMER))
+    gap = int(cfg.get("gap", _DEF_GAP))
+    exclude = bool(cfg.get("exclude_winners"))
+    username = await _bot_username(bot)
+    winners = set()
+    ACTIVE[bot_id] = {"running": True, "group_id": group_id, "msg_id": None, "participants": {}}
+    try:
+        if channel_id:
+            txt = cfg.get("msg_channel") or "🎉 الفعالية بدأت!"
+            try:
+                await bot.send_message(channel_id, txt)
+            except Exception as e:
+                if _logger:
+                    _logger.exception("event channel post failed: %s", e)
+                try:
+                    await _main_bot.send_message(_ADMIN_ID, "⚠️ ما قدرت أنشر في القناة. تأكد أن البوت مشرف فيها.")
+                except Exception:
+                    pass
+        if cfg.get("msg_group"):
+            try:
+                await bot.send_message(group_id, cfg["msg_group"])
+            except Exception:
+                pass
+        for idx, prize in enumerate(prizes):
+            ACTIVE[bot_id]["participants"] = {}
+            pname = _html.escape(prize.get("name") or "جائزة")
+            try:
+                msg = await bot.send_message(
+                    group_id,
+                    f"🎰 <b>روليت الجائزة {idx+1}:</b> {pname}\n\n"
+                    f"تفاعل على هذي الرسالة للدخول! 🎉\n"
+                    f"⏱ ينتهي خلال {timer} ثانية.",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                if _logger:
+                    _logger.exception("event round post failed: %s", e)
+                try:
+                    await _main_bot.send_message(_ADMIN_ID, "⚠️ ما قدرت أنشر في القروب. تأكد أن البوت مشرف فيه.")
+                except Exception:
+                    pass
+                break
+            ACTIVE[bot_id]["msg_id"] = msg.message_id
+            await asyncio.sleep(timer)
+            parts = dict(ACTIVE[bot_id]["participants"])
+            ACTIVE[bot_id]["msg_id"] = None
+            pool = [(uid, nm) for uid, nm in parts.items() if not (exclude and uid in winners)]
+            if not pool:
+                try:
+                    await bot.send_message(group_id, f"🎁 {pname}: ما فيه مشاركين مؤهلين. تخطّينا الجائزة.")
+                except Exception:
+                    pass
+                if idx < len(prizes) - 1:
+                    await asyncio.sleep(gap)
+                continue
+            names = [nm for _, nm in pool]
+            for _ in range(min(6, max(3, len(names)))):
+                try:
+                    await bot.edit_message_text(
+                        chat_id=group_id, message_id=msg.message_id,
+                        text=f"🎰 جاري سحب: {pname}\n\n🎲 {_html.escape(random.choice(names))}",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.7)
+            win_id, win_name = random.choice(pool)
+            winners.add(win_id)
+            claim_id = _make_claim(bot_id, idx, prize, win_id, win_name)
+            mention = f'<a href="tg://user?id={win_id}">{_html.escape(win_name or "الفائز")}</a>'
+            kb = InlineKeyboardBuilder()
+            if username:
+                kb.button(text="🎁 استلم جائزتك", url=f"https://t.me/{username}?start={claim_id}")
+            try:
+                await bot.send_message(
+                    group_id,
+                    f"🎉 مبروك! الفائز بـ <b>{pname}</b>:\n{mention}\n\n"
+                    f"اضغط الزر تحت لاستلام الكود بالخاص 👇",
+                    parse_mode="HTML",
+                    reply_markup=kb.as_markup() if username else None,
+                )
+            except Exception as e:
+                if _logger:
+                    _logger.exception("event winner post failed: %s", e)
+            if idx < len(prizes) - 1:
+                await asyncio.sleep(gap)
+        try:
+            await bot.send_message(group_id, "🏁 انتهت الفعالية. شكرًا للجميع!")
+        except Exception:
+            pass
+    finally:
+        ACTIVE.pop(bot_id, None)
+
+
+@event_dp.message_reaction()
+async def _on_reaction(event: MessageReactionUpdated, bot: Bot):
+    st = ACTIVE.get(bot.id)
+    if not st or not st.get("running"):
+        return
+    if event.chat.id != st.get("group_id") or event.message_id != st.get("msg_id"):
+        return
+    u = event.user
+    if u is None or getattr(u, "is_bot", False):
+        return
+    if event.new_reaction:
+        st["participants"][u.id] = u.first_name or u.full_name or "مشارك"
+    else:
+        st["participants"].pop(u.id, None)
+
+
+async def _handle_claim(message, bot, payload):
+    if _db is None:
+        return
+    try:
+        snap = _db.collection("event_winners").document(payload).get()
+    except Exception:
+        return
+    if not snap.exists:
+        return
+    d = snap.to_dict() or {}
+    if d.get("bot_id") != bot.id:
+        return
+    if message.from_user.id != d.get("winner_id"):
+        return  # ليس الفائز — بدون رد
+    code = d.get("code")
+    prize = d.get("prize") or "جائزتك"
+    try:
+        await message.answer(
+            f"🎁 مبروك! كود {_html.escape(str(prize))}:\n<code>{_html.escape(str(code))}</code>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        return
+    if not d.get("claimed"):
+        try:
+            _db.collection("event_winners").document(payload).set({"claimed": True, "claimed_at": _now()}, merge=True)
+        except Exception:
+            pass
+
+
 # ================= تفعيل بوتات الفعالية =================
 async def _activate_event_bot(token, username=None):
     if token in EVENT_BOTS:
@@ -477,7 +679,7 @@ async def _activate_event_bot(token, username=None):
         await b.set_webhook(
             f"{_WEBHOOK_HOST}/ev/{token}",
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query", "my_chat_member"],
+            allowed_updates=["message", "callback_query", "my_chat_member", "message_reaction"],
         )
         if _logger:
             _logger.info("event webhook set for @%s", username)
