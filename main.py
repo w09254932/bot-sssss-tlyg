@@ -28,6 +28,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 import monitor
+import event
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -1446,6 +1447,7 @@ def main():
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     monitor.setup_monitor(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
+    event.setup_event(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger)
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":

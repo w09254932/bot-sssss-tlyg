@@ -1206,9 +1206,14 @@ async def _cb_mon_role_event(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     await callback.answer()
+    await state.set_state(MonAdminFSM.token)
+    await state.update_data(role="event")
     await callback.message.answer(
-        "🎉 بوت الفعالية قيد التطوير — نفعّله قريبًا.",
-        reply_markup=_mon_menu_kb(),
+        "📥 أرسل الآن توكن بوت الفعالية (من @BotFather).\n\n"
+        "مثال على شكل التوكن:\n"
+        "1234567890:AAExampleTokenHere...\n\n"
+        "⚠️ استخدم توكن بوت خاص بك.\n"
+        "/cancel للإلغاء"
     )
 
 
@@ -1225,6 +1230,23 @@ async def _got_token(message: Message, state: FSMContext):
         me = await tmp.get_me()
     except Exception:
         await message.answer("❌ التوكن غير صالح. تأكد من نسخه كامل وحاول مرة ثانية.")
+        try:
+            await tmp.session.close()
+        except Exception:
+            pass
+        return
+    if role == "event":
+        try:
+            import event
+            await event.add_event_bot(token, me)
+            await message.answer(
+                f"✅ تم ربط بوت الفعالية: @{me.username}\n\n"
+                "افتح البوت بالخاص واضبط الإعدادات (القناة، القروب، الجوائز، الأوقات).",
+                reply_markup=_mon_menu_kb(),
+            )
+        except Exception as e:
+            _logger.exception("event add failed: %s", e)
+            await message.answer("⚠️ تعذّر تفعيل بوت الفعالية.", reply_markup=_mon_menu_kb())
         try:
             await tmp.session.close()
         except Exception:
