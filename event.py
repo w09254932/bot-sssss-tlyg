@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import StateFilter, CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Update, Message, CallbackQuery, MessageReactionUpdated
+from aiogram.types import Update, Message, CallbackQuery, MessageReactionUpdated, ChatMemberUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 
@@ -636,6 +636,43 @@ async def _on_reaction(event: MessageReactionUpdated, bot: Bot):
         st["participants"][u.id] = u.first_name or u.full_name or "مشارك"
     else:
         st["participants"].pop(u.id, None)
+
+
+@event_dp.my_chat_member()
+async def _ev_my_member(event: ChatMemberUpdated, bot: Bot):
+    # تسجيل تلقائي للقناة/المجموعة عند إضافة البوت (من المالك فقط)
+    if event.from_user is None or not _is_owner(event.from_user.id):
+        return
+    status = event.new_chat_member.status if event.new_chat_member else None
+    if status not in ("administrator", "member", "creator"):
+        return
+    chat = event.chat
+    cfg = _load_cfg(bot.id)
+    if chat.type == "channel":
+        cfg["channel_id"] = chat.id
+        label = "القناة"
+    elif chat.type in ("group", "supergroup"):
+        cfg["group_id"] = chat.id
+        label = "المجموعة"
+    else:
+        return
+    _save_cfg(bot.id, cfg)
+    try:
+        await bot.send_message(
+            chat.id,
+            f"✅ تم تفعيل بوت الفعالية في {label}.\n🆔 <code>{chat.id}</code>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    try:
+        if _main_bot is not None and _ADMIN_ID:
+            await _main_bot.send_message(
+                _ADMIN_ID,
+                f"✅ ارتبطت {label}: {chat.title or chat.id}\n🆔 {chat.id}",
+            )
+    except Exception:
+        pass
 
 
 async def _handle_claim(message, bot, payload):
