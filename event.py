@@ -638,7 +638,8 @@ async def _run_group(bot, cfg):
             try:
                 await bot.send_message(
                     group_id,
-                    f"🎉 مبروك! الفائز بـ <b>{pname}</b>:\n{mention}\n\n"
+                    f"🎉 مبروك! الفائز بـ <b>{pname}</b>:\n{mention}\n"
+                    f"👥 من بين {len(pool)} مشارك\n\n"
                     f"اضغط الزر تحت لاستلام الكود بالخاص 👇",
                     parse_mode="HTML",
                     reply_markup=kb.as_markup() if username else None,
