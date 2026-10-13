@@ -1176,12 +1176,13 @@ async def _cb_mon_add(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
     await callback.answer()
-    await state.clear()
+    await state.set_state(MonAdminFSM.token)
     await callback.message.answer(
-        "🧩 اختر وظيفة البوت الذي تريد إضافته:\n\n"
-        "🔎 مراقبة اليوزرات: يسجّل الأعضاء وينبّه عند تغيير اليوزر/الاسم.\n"
-        "🎉 بوت فعالية: قريبًا.",
-        reply_markup=_mon_role_kb(),
+        "📥 أرسل الآن توكن بوت المراقبة (من @BotFather).\n\n"
+        "مثال على شكل التوكن:\n"
+        "1234567890:AAExampleTokenHere...\n\n"
+        "⚠️ استخدم توكن بوت خاص بك.\n"
+        "/cancel للإلغاء"
     )
 
 
@@ -1474,8 +1475,6 @@ async def _cb_mon_back(callback: CallbackQuery, state: FSMContext):
 def _register_admin_handlers(dp: Dispatcher):
     dp.callback_query.register(_cb_mon_open, F.data == "admin:mon")
     dp.callback_query.register(_cb_mon_add, F.data == "mon:add")
-    dp.callback_query.register(_cb_mon_role_monitor, F.data == "monrole:monitor")
-    dp.callback_query.register(_cb_mon_role_event, F.data == "monrole:event")
     dp.callback_query.register(_cb_mon_dellist, F.data == "mon:dellist")
     dp.callback_query.register(_cb_mon_del, F.data.startswith("mon:del:"))
     dp.callback_query.register(_cb_mon_chats, F.data == "mon:chats")

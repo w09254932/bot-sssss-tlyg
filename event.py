@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # بوت الفعالية (السحب/الجوائز) — ملف مستقل يُدمج مع main.py
-# المرحلة 1: التأسيس + لوحة إعدادات كاملة للمالك داخل بوت الفعالية
-#   - تسجيل القناة والقروب، الجوائز + الأكواد، مؤقّت الجولة، الفاصل،
-#     استبعاد الفائز، وقت الجدولة، نصوص رسائل القناة/القروب
+# - إدارة مستقلة من زر "بوت الفعالية" في لوحة المالك ببوت الشعبية (إضافة توكن)
+# - لوحة إعدادات كاملة داخل بوت الفعالية نفسه
+# - موعدان منفصلان: إعلان القناة، وبدء سحب القروب (+ زرّا تشغيل يدوي منفصلان)
 # كل بوت فعالية له توكن خاص، ويُشغّل على مسار /ev/{token}
 import asyncio
 import html as _html
@@ -21,23 +21,22 @@ from aiohttp import web
 OWNER_ID = 1652300694
 
 # ---- حقن من main.py عبر setup_event ----
-_main_bot = None       # البوت الرئيسي (للتنبيهات)
-_db = None             # Firestore client
+_main_bot = None
+_db = None
 _ADMIN_ID = 0
 _WEBHOOK_HOST = ""
 _logger = None
+_admin_menu_markup = None
 
-EVENT_BOTS = {}        # token -> Bot
-EV_INFO = {}           # token -> {"id":.., "username":..}
+EVENT_BOTS = {}
+EV_INFO = {}
 
 event_dp = Dispatcher()
 
-# حالة الفعاليات الجارية (بالذاكرة) — bot_id -> state
 ACTIVE = {}
 
-# افتراضيات الإعدادات
-_DEF_TIMER = 60        # ثانية لكل جولة
-_DEF_GAP = 10          # ثانية بين الجوائز
+_DEF_TIMER = 60
+_DEF_GAP = 10
 
 
 def _is_owner(uid) -> bool:
@@ -95,11 +94,12 @@ def _default_cfg(bot_id):
         "bot_id": bot_id,
         "channel_id": None,
         "group_id": None,
-        "prizes": [],            # [{"name":.., "code":..}]
+        "prizes": [],
         "round_timer": _DEF_TIMER,
         "gap": _DEF_GAP,
         "exclude_winners": True,
-        "schedule_at": None,     # ISO string (توقيت الرياض)
+        "schedule_channel": None,
+        "schedule_group": None,
         "msg_channel": None,
         "msg_group": None,
     }
@@ -116,6 +116,8 @@ def _load_cfg(bot_id):
             cfg.update(d)
             cfg["bot_id"] = bot_id
             cfg["prizes"] = list(d.get("prizes") or [])
+            if not cfg.get("schedule_group") and d.get("schedule_at"):
+                cfg["schedule_group"] = d.get("schedule_at")
             return cfg
     except Exception as e:
         if _logger:
@@ -136,7 +138,7 @@ def _save_cfg(bot_id, cfg):
             _logger.exception("event save_cfg failed: %s", e)
 
 
-# ================= واجهة الإعدادات =================
+# ================= واجهة إعدادات بوت الفعالية (بالخاص) =================
 class EvFSM(StatesGroup):
     channel = State()
     group = State()
@@ -144,7 +146,8 @@ class EvFSM(StatesGroup):
     prize_code = State()
     timer = State()
     gap = State()
-    schedule = State()
+    sched_channel = State()
+    sched_group = State()
     msg_channel = State()
     msg_group = State()
 
@@ -168,7 +171,8 @@ def _status_text(cfg) -> str:
         f"⏱ مؤقّت الجولة: {cfg.get('round_timer', _DEF_TIMER)} ثانية\n"
         f"⏳ الفاصل بين الجوائز: {cfg.get('gap', _DEF_GAP)} ثانية\n"
         f"🔁 استبعاد الفائز: {'نعم' if cfg.get('exclude_winners') else 'لا'}\n"
-        f"🕐 وقت الجدولة: {cfg.get('schedule_at') or '—'}\n"
+        f"🕐 موعد إعلان القناة: {cfg.get('schedule_channel') or '—'}\n"
+        f"🕐 موعد بدء القروب: {cfg.get('schedule_group') or '—'}\n"
         f"✉️ رسالة القناة: {'مضبوطة' if cfg.get('msg_channel') else '—'}\n"
         f"✉️ رسالة القروب: {'مضبوطة' if cfg.get('msg_group') else '—'}\n"
         "━━━━━━━━━━━━━━\n"
@@ -186,12 +190,14 @@ def _panel_kb(cfg):
     kb.button(text="⏳ الفاصل", callback_data="evset:gap")
     excl = "🔁 استبعاد الفائز: نعم" if cfg.get("exclude_winners") else "🔁 استبعاد الفائز: لا"
     kb.button(text=excl, callback_data="evset:excl")
-    kb.button(text="🕐 وقت الجدولة", callback_data="evset:sched")
+    kb.button(text="🕐 موعد القناة", callback_data="evset:sched_chan")
+    kb.button(text="🕐 موعد القروب", callback_data="evset:sched_grp")
     kb.button(text="✉️ رسالة القناة", callback_data="evset:mchan")
     kb.button(text="✉️ رسالة القروب", callback_data="evset:mgrp")
-    kb.button(text="▶️ ابدأ الآن", callback_data="evset:startnow")
+    kb.button(text="📢 نشر القناة الآن", callback_data="evset:chan_now")
+    kb.button(text="▶️ ابدأ القروب الآن", callback_data="evset:group_now")
     kb.button(text="🔄 تحديث", callback_data="evset:refresh")
-    kb.adjust(2, 2, 2, 1, 2, 1, 1)
+    kb.adjust(2, 2, 2, 1, 2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -199,7 +205,13 @@ async def _show_panel(message, cfg):
     await message.answer(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
 
 
-# ---- فتح البوت بالخاص ----
+async def _refresh_panel(cb, cfg):
+    try:
+        await cb.message.edit_text(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
+    except Exception:
+        await cb.message.answer(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
+
+
 @event_dp.message(CommandStart())
 async def _ev_start(message: Message, bot: Bot, state: FSMContext, command: CommandObject):
     await state.clear()
@@ -216,21 +228,12 @@ async def _ev_start(message: Message, bot: Bot, state: FSMContext, command: Comm
     await _show_panel(message, _load_cfg(bot.id))
 
 
-# ---- أزرار الإعدادات ----
-def _bid(cb):
-    return cb.bot.id
-
-
 @event_dp.callback_query(F.data == "evset:refresh")
 async def _cb_refresh(cb: CallbackQuery, bot: Bot):
     if not _is_owner(cb.from_user.id):
         await cb.answer(); return
     await cb.answer("تم التحديث")
-    cfg = _load_cfg(bot.id)
-    try:
-        await cb.message.edit_text(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
-    except Exception:
-        await cb.message.answer(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
+    await _refresh_panel(cb, _load_cfg(bot.id))
 
 
 @event_dp.callback_query(F.data == "evset:excl")
@@ -241,10 +244,7 @@ async def _cb_excl(cb: CallbackQuery, bot: Bot):
     cfg["exclude_winners"] = not cfg.get("exclude_winners")
     _save_cfg(bot.id, cfg)
     await cb.answer("تم التبديل")
-    try:
-        await cb.message.edit_text(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
-    except Exception:
-        await cb.message.answer(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
+    await _refresh_panel(cb, cfg)
 
 
 @event_dp.callback_query(F.data == "evset:prize_clear")
@@ -255,21 +255,29 @@ async def _cb_prize_clear(cb: CallbackQuery, bot: Bot):
     cfg["prizes"] = []
     _save_cfg(bot.id, cfg)
     await cb.answer("تم مسح الجوائز")
-    try:
-        await cb.message.edit_text(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
-    except Exception:
-        await cb.message.answer(_status_text(cfg), parse_mode="HTML", reply_markup=_panel_kb(cfg))
+    await _refresh_panel(cb, cfg)
 
 
-@event_dp.callback_query(F.data == "evset:startnow")
-async def _cb_startnow(cb: CallbackQuery, bot: Bot):
+@event_dp.callback_query(F.data == "evset:chan_now")
+async def _cb_channel_now(cb: CallbackQuery, bot: Bot):
+    if not _is_owner(cb.from_user.id):
+        await cb.answer(); return
+    await cb.answer()
+    cfg = _load_cfg(bot.id)
+    if not cfg.get("channel_id"):
+        await cb.message.answer("⚠️ عيّن القناة أولًا (أو أضف البوت مشرفًا فيها).")
+        return
+    ok = await _post_channel(bot, cfg)
+    await cb.message.answer("📢 تم نشر إعلان القناة." if ok else "⚠️ تعذّر النشر في القناة. تأكد أن البوت مشرف فيها.")
+
+
+@event_dp.callback_query(F.data == "evset:group_now")
+async def _cb_group_now(cb: CallbackQuery, bot: Bot):
     if not _is_owner(cb.from_user.id):
         await cb.answer(); return
     await cb.answer()
     cfg = _load_cfg(bot.id)
     problems = []
-    if not cfg.get("channel_id"):
-        problems.append("• عيّن القناة")
     if not cfg.get("group_id"):
         problems.append("• عيّن القروب")
     prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
@@ -279,22 +287,22 @@ async def _cb_startnow(cb: CallbackQuery, bot: Bot):
         await cb.message.answer("⚠️ أكمل الإعدادات أولًا:\n" + "\n".join(problems))
         return
     if bot.id in ACTIVE and ACTIVE[bot.id].get("running"):
-        await cb.message.answer("⏳ فيه فعالية جارية بالفعل.")
+        await cb.message.answer("⏳ فيه سحب جارٍ بالفعل.")
         return
-    await cb.message.answer("▶️ بدأت الفعالية.")
-    asyncio.create_task(_run_event(bot, cfg))
+    await cb.message.answer("▶️ بدأ سحب القروب.")
+    asyncio.create_task(_run_group(bot, cfg))
 
 
-# أزرار تطلب إدخال نصّي → نحفظ أي بوت (bot.id) في الحالة
 _PROMPTS = {
-    "evset:chan": (EvFSM.channel, "📢 أرسل آيدي القناة (مثال: -1001234567890)\nأضِف البوت مشرفًا في القناة أولًا.\n/cancel للإلغاء"),
-    "evset:grp": (EvFSM.group, "👥 أرسل آيدي القروب (مثال: -1001234567890)\nأضِف البوت مشرفًا في القروب أولًا.\n/cancel للإلغاء"),
+    "evset:chan": (EvFSM.channel, "📢 أرسل آيدي القناة (مثال: -1001234567890)\nأو الأسهل: أضف البوت مشرفًا في القناة ويتسجّل تلقائيًا.\n/cancel للإلغاء"),
+    "evset:grp": (EvFSM.group, "👥 أرسل آيدي القروب (مثال: -1001234567890)\nأو الأسهل: أضف البوت مشرفًا في القروب ويتسجّل تلقائيًا.\n/cancel للإلغاء"),
     "evset:prize_add": (EvFSM.prize_name, "🎁 أرسل اسم الجائزة:\n/cancel للإلغاء"),
     "evset:timer": (EvFSM.timer, "⏱ أرسل مدة الجولة بالثواني (مثال: 60):\n/cancel للإلغاء"),
     "evset:gap": (EvFSM.gap, "⏳ أرسل الفاصل بين الجوائز بالثواني (مثال: 10):\n/cancel للإلغاء"),
-    "evset:sched": (EvFSM.schedule, "🕐 أرسل وقت الجدولة بصيغة:\nYYYY-MM-DD HH:MM (توقيت الرياض)\nمثال: 2026-10-15 21:30\nأرسل - لإلغاء الجدولة.\n/cancel للإلغاء"),
-    "evset:mchan": (EvFSM.msg_channel, "✉️ أرسل نص رسالة القناة (يُنشر عند بدء الفعالية):\n/cancel للإلغاء"),
-    "evset:mgrp": (EvFSM.msg_group, "✉️ أرسل نص رسالة القروب (تمهيد الفعالية):\n/cancel للإلغاء"),
+    "evset:sched_chan": (EvFSM.sched_channel, "🕐 موعد إعلان القناة بصيغة:\nYYYY-MM-DD HH:MM (توقيت الرياض)\nمثال: 2026-10-15 21:00\nأرسل - لإلغاء الموعد.\n/cancel للإلغاء"),
+    "evset:sched_grp": (EvFSM.sched_group, "🕐 موعد بدء سحب القروب بصيغة:\nYYYY-MM-DD HH:MM (توقيت الرياض)\nمثال: 2026-10-15 21:30\nأرسل - لإلغاء الموعد.\n/cancel للإلغاء"),
+    "evset:mchan": (EvFSM.msg_channel, "✉️ أرسل نص رسالة القناة (الإعلان):\n/cancel للإلغاء"),
+    "evset:mgrp": (EvFSM.msg_group, "✉️ أرسل نص رسالة القروب (تمهيد قبل الجولات):\n/cancel للإلغاء"),
 }
 
 
@@ -312,7 +320,6 @@ async def _cb_prompt(cb: CallbackQuery, bot: Bot, state: FSMContext):
     await cb.message.answer(text)
 
 
-# ---- /cancel ----
 @event_dp.message(F.text == "/cancel")
 async def _ev_cancel(message: Message, bot: Bot, state: FSMContext):
     if not _is_owner(message.from_user.id):
@@ -329,7 +336,17 @@ def _parse_id(txt):
         return None
 
 
-# ---- مُدخلات الإعدادات (حالات FSM) ----
+def _parse_sched(txt):
+    txt = (txt or "").strip()
+    if txt == "-":
+        return "clear"
+    try:
+        dt = datetime.strptime(txt, "%Y-%m-%d %H:%M")
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
 @event_dp.message(StateFilter(EvFSM.channel))
 async def _st_channel(message: Message, bot: Bot, state: FSMContext):
     if not _is_owner(message.from_user.id):
@@ -427,27 +444,35 @@ async def _st_gap(message: Message, bot: Bot, state: FSMContext):
     await _show_panel(message, cfg)
 
 
-@event_dp.message(StateFilter(EvFSM.schedule))
-async def _st_schedule(message: Message, bot: Bot, state: FSMContext):
+@event_dp.message(StateFilter(EvFSM.sched_channel))
+async def _st_sched_channel(message: Message, bot: Bot, state: FSMContext):
     if not _is_owner(message.from_user.id):
         return
     await state.clear()
-    txt = (message.text or "").strip()
+    v = _parse_sched(message.text)
     cfg = _load_cfg(bot.id)
-    if txt == "-":
-        cfg["schedule_at"] = None
-        _save_cfg(bot.id, cfg)
-        await message.answer("✅ أُلغيت الجدولة.")
-        await _show_panel(message, cfg)
+    if v is None:
+        await message.answer("❌ صيغة غير صحيحة. مثال: 2026-10-15 21:00")
         return
-    try:
-        dt = datetime.strptime(txt, "%Y-%m-%d %H:%M")
-    except Exception:
+    cfg["schedule_channel"] = None if v == "clear" else v
+    _save_cfg(bot.id, cfg)
+    await message.answer("✅ أُلغي موعد القناة." if v == "clear" else f"✅ موعد إعلان القناة: {v} (الرياض)")
+    await _show_panel(message, cfg)
+
+
+@event_dp.message(StateFilter(EvFSM.sched_group))
+async def _st_sched_group(message: Message, bot: Bot, state: FSMContext):
+    if not _is_owner(message.from_user.id):
+        return
+    await state.clear()
+    v = _parse_sched(message.text)
+    cfg = _load_cfg(bot.id)
+    if v is None:
         await message.answer("❌ صيغة غير صحيحة. مثال: 2026-10-15 21:30")
         return
-    cfg["schedule_at"] = dt.strftime("%Y-%m-%d %H:%M")
+    cfg["schedule_group"] = None if v == "clear" else v
     _save_cfg(bot.id, cfg)
-    await message.answer(f"✅ وقت الجدولة: {cfg['schedule_at']} (الرياض)")
+    await message.answer("✅ أُلغي موعد القروب." if v == "clear" else f"✅ موعد بدء القروب: {v} (الرياض)")
     await _show_panel(message, cfg)
 
 
@@ -475,7 +500,6 @@ async def _st_mgrp(message: Message, bot: Bot, state: FSMContext):
     await _show_panel(message, cfg)
 
 
-# ---- أي رسالة خاصة أخرى من المالك → اعرض اللوحة ----
 @event_dp.message(F.chat.type == "private")
 async def _ev_private(message: Message, bot: Bot, state: FSMContext):
     u = message.from_user
@@ -486,7 +510,7 @@ async def _ev_private(message: Message, bot: Bot, state: FSMContext):
         return
     cur = await state.get_state()
     if cur is not None:
-        return  # في منتصف إدخال
+        return
     await _show_panel(message, _load_cfg(bot.id))
 
 
@@ -523,11 +547,31 @@ def _make_claim(bot_id, round_idx, prize, winner_id, winner_name):
     return claim_id
 
 
-async def _run_event(bot, cfg):
+async def _post_channel(bot, cfg):
+    channel_id = cfg.get("channel_id")
+    if not channel_id:
+        return False
+    txt = cfg.get("msg_channel") or "🎉 الفعالية قريبًا!"
+    try:
+        await bot.send_message(channel_id, txt)
+        return True
+    except Exception as e:
+        if _logger:
+            _logger.exception("event channel post failed: %s", e)
+        try:
+            if _main_bot is not None and _ADMIN_ID:
+                await _main_bot.send_message(_ADMIN_ID, "⚠️ ما قدرت أنشر في القناة. تأكد أن البوت مشرف فيها.")
+        except Exception:
+            pass
+        return False
+
+
+async def _run_group(bot, cfg):
     bot_id = bot.id
     group_id = cfg.get("group_id")
-    channel_id = cfg.get("channel_id")
     prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
+    if not group_id or not prizes:
+        return
     timer = int(cfg.get("round_timer", _DEF_TIMER))
     gap = int(cfg.get("gap", _DEF_GAP))
     exclude = bool(cfg.get("exclude_winners"))
@@ -535,17 +579,6 @@ async def _run_event(bot, cfg):
     winners = set()
     ACTIVE[bot_id] = {"running": True, "group_id": group_id, "msg_id": None, "participants": {}}
     try:
-        if channel_id:
-            txt = cfg.get("msg_channel") or "🎉 الفعالية بدأت!"
-            try:
-                await bot.send_message(channel_id, txt)
-            except Exception as e:
-                if _logger:
-                    _logger.exception("event channel post failed: %s", e)
-                try:
-                    await _main_bot.send_message(_ADMIN_ID, "⚠️ ما قدرت أنشر في القناة. تأكد أن البوت مشرف فيها.")
-                except Exception:
-                    pass
         if cfg.get("msg_group"):
             try:
                 await bot.send_message(group_id, cfg["msg_group"])
@@ -566,7 +599,8 @@ async def _run_event(bot, cfg):
                 if _logger:
                     _logger.exception("event round post failed: %s", e)
                 try:
-                    await _main_bot.send_message(_ADMIN_ID, "⚠️ ما قدرت أنشر في القروب. تأكد أن البوت مشرف فيه.")
+                    if _main_bot is not None and _ADMIN_ID:
+                        await _main_bot.send_message(_ADMIN_ID, "⚠️ ما قدرت أنشر في القروب. تأكد أن البوت مشرف فيه.")
                 except Exception:
                     pass
                 break
@@ -640,7 +674,6 @@ async def _on_reaction(event: MessageReactionUpdated, bot: Bot):
 
 @event_dp.my_chat_member()
 async def _ev_my_member(event: ChatMemberUpdated, bot: Bot):
-    # تسجيل تلقائي للقناة/المجموعة عند إضافة البوت (من المالك فقط)
     if event.from_user is None or not _is_owner(event.from_user.id):
         return
     status = event.new_chat_member.status if event.new_chat_member else None
@@ -688,7 +721,7 @@ async def _handle_claim(message, bot, payload):
     if d.get("bot_id") != bot.id:
         return
     if message.from_user.id != d.get("winner_id"):
-        return  # ليس الفائز — بدون رد
+        return
     code = d.get("code")
     prize = d.get("prize") or "جائزتك"
     try:
@@ -703,6 +736,102 @@ async def _handle_claim(message, bot, payload):
             _db.collection("event_winners").document(payload).set({"claimed": True, "claimed_at": _now()}, merge=True)
         except Exception:
             pass
+
+
+# ================= لوحة إدارة بوتات الفعالية (داخل بوت الشعبية) =================
+class EvAddFSM(StatesGroup):
+    token = State()
+
+
+def _ev_admin_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ إضافة بوت فعالية", callback_data="ev:add")
+    kb.button(text="🔙 رجوع", callback_data="ev:back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _cb_admin_ev(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer(); return
+    await callback.answer()
+    await state.clear()
+    txt = (
+        "🎉 <b>بوت الفعالية</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        "أضف توكن بوت فعالية مستقل، وبعدها افتح البوت نفسه بالخاص واضبط إعداداته.\n"
+        "تقدر تضيف البوت مشرفًا في قناتك وقروبك ويتسجّلوا تلقائيًا."
+    )
+    try:
+        await callback.message.edit_text(txt, parse_mode="HTML", reply_markup=_ev_admin_kb())
+    except Exception:
+        await callback.message.answer(txt, parse_mode="HTML", reply_markup=_ev_admin_kb())
+
+
+async def _cb_ev_add(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer(); return
+    await callback.answer()
+    await state.set_state(EvAddFSM.token)
+    await callback.message.answer(
+        "📥 أرسل الآن توكن بوت الفعالية (من @BotFather).\n\n"
+        "مثال على شكل التوكن:\n"
+        "1234567890:AAExampleTokenHere...\n\n"
+        "⚠️ استخدم توكن بوت خاص بك.\n"
+        "/cancel للإلغاء"
+    )
+
+
+async def _got_ev_token(message: Message, state: FSMContext):
+    token = (message.text or "").strip()
+    await state.clear()
+    if ":" not in token or len(token) < 20:
+        await message.answer("❌ التوكن غير صالح. تأكد من نسخه كامل وحاول مرة ثانية.")
+        return
+    tmp = Bot(token)
+    try:
+        me = await tmp.get_me()
+    except Exception:
+        await message.answer("❌ التوكن غير صالح. تأكد من نسخه كامل وحاول مرة ثانية.")
+        try:
+            await tmp.session.close()
+        except Exception:
+            pass
+        return
+    try:
+        await add_event_bot(token, me)
+        await message.answer(
+            f"✅ تم ربط بوت الفعالية: @{me.username}\n\n"
+            f"افتح البوت بالخاص (@{me.username}) واضبط إعداداته، "
+            "أو أضفه مشرفًا في قناتك/قروبك ليتسجّلوا تلقائيًا."
+        )
+    except Exception as e:
+        if _logger:
+            _logger.exception("event add failed: %s", e)
+        await message.answer("⚠️ تعذّر تفعيل بوت الفعالية.")
+    try:
+        await tmp.session.close()
+    except Exception:
+        pass
+
+
+async def _cb_ev_back(callback: CallbackQuery, state: FSMContext):
+    if not _is_owner(callback.from_user.id):
+        await callback.answer(); return
+    await callback.answer()
+    await state.clear()
+    markup = _admin_menu_markup() if _admin_menu_markup else None
+    try:
+        await callback.message.edit_text("🛠 لوحة المالك", reply_markup=markup)
+    except Exception:
+        await callback.message.answer("🛠 لوحة المالك", reply_markup=markup)
+
+
+def _register_admin_handlers(dp: Dispatcher):
+    dp.callback_query.register(_cb_admin_ev, F.data == "admin:ev")
+    dp.callback_query.register(_cb_ev_add, F.data == "ev:add")
+    dp.callback_query.register(_cb_ev_back, F.data == "ev:back")
+    dp.message.register(_got_ev_token, StateFilter(EvAddFSM.token), F.from_user.id == _ADMIN_ID)
 
 
 # ================= تفعيل بوتات الفعالية =================
@@ -727,7 +856,6 @@ async def _activate_event_bot(token, username=None):
 
 
 async def add_event_bot(token, me):
-    """يُستدعى من monitor._got_token عند اختيار دور (فعالية)."""
     if _db is not None:
         try:
             _db.collection("event_bots").document(str(me.id)).set({
@@ -797,30 +925,37 @@ def _due(schedule_at):
     return _now() >= dt_utc
 
 
+async def _notify_owner(text):
+    try:
+        if _main_bot is not None and _ADMIN_ID:
+            await _main_bot.send_message(_ADMIN_ID, text)
+    except Exception:
+        pass
+
+
 async def _sched_check():
     for token, b in list(EVENT_BOTS.items()):
         try:
             bot_id = b.id
         except Exception:
             continue
-        if bot_id in ACTIVE and ACTIVE[bot_id].get("running"):
-            continue
         cfg = _load_cfg(bot_id)
-        if not _due(cfg.get("schedule_at")):
-            continue
-        prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
-        if not cfg.get("group_id") or not prizes:
-            cfg["schedule_at"] = None
+        changed = False
+        if _due(cfg.get("schedule_channel")):
+            cfg["schedule_channel"] = None
+            changed = True
+            if cfg.get("channel_id"):
+                asyncio.create_task(_post_channel(b, dict(cfg)))
+                await _notify_owner("📢 نُشر إعلان القناة المجدول.")
+        if _due(cfg.get("schedule_group")) and not (bot_id in ACTIVE and ACTIVE[bot_id].get("running")):
+            prizes = [p for p in (cfg.get("prizes") or []) if p.get("code")]
+            cfg["schedule_group"] = None
+            changed = True
+            if cfg.get("group_id") and prizes:
+                asyncio.create_task(_run_group(b, dict(cfg)))
+                await _notify_owner("▶️ انطلق سحب القروب المجدول.")
+        if changed:
             _save_cfg(bot_id, cfg)
-            continue
-        cfg["schedule_at"] = None
-        _save_cfg(bot_id, cfg)
-        try:
-            if _main_bot is not None and _ADMIN_ID:
-                await _main_bot.send_message(_ADMIN_ID, "▶️ انطلقت الفعالية المجدولة.")
-        except Exception:
-            pass
-        asyncio.create_task(_run_event(b, cfg))
 
 
 async def _sched_loop():
@@ -837,14 +972,16 @@ async def _ev_startup():
     asyncio.create_task(_sched_loop())
 
 
-def setup_event(app, dp, main_bot, db, admin_id, webhook_host, logger):
-    global _main_bot, _db, _ADMIN_ID, _WEBHOOK_HOST, _logger
+def setup_event(app, dp, main_bot, db, admin_id, webhook_host, logger, admin_menu_markup=None):
+    global _main_bot, _db, _ADMIN_ID, _WEBHOOK_HOST, _logger, _admin_menu_markup
     _main_bot = main_bot
     _db = db
     _ADMIN_ID = admin_id
     _WEBHOOK_HOST = (webhook_host or "").rstrip("/")
     _logger = logger
+    _admin_menu_markup = admin_menu_markup
     _init_crypto()
+    _register_admin_handlers(dp)
     app.router.add_post("/ev/{token}", _ev_webhook)
     dp.startup.register(_ev_startup)
     logger.info("event module ready")

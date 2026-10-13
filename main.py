@@ -310,6 +310,7 @@ def admin_menu_keyboard():
     kb.button(text="📢 بث رسالة", callback_data="admin:broadcast")
     kb.button(text="🚫 إدارة الحظر", callback_data="admin:ban")
     kb.button(text="🔎 مراقبة اليوزرات", callback_data="admin:mon")
+    kb.button(text="🎉 بوت الفعالية", callback_data="admin:ev")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -1447,7 +1448,7 @@ def main():
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     setup_application(app, dp, bot=bot)
     monitor.setup_monitor(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
-    event.setup_event(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger)
+    event.setup_event(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
