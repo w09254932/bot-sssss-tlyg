@@ -714,8 +714,8 @@ async def richtest_cmd(message: Message):
                  {"text": "#3", "align": "center", "valign": "middle"}],
             ]},
             {"type": "buttons", "align": "center", "buttons": [
-                {"text": "🔄 احسب مرة ثانية", "callback_data": "calc:again", "style": "primary"},
-                {"text": "🏆 لوحة الصدارة", "callback_data": "calc:leaderboard"},
+                {"text": "📋 نسخ النتيجة", "style": "primary",
+                 "copy_text": {"text": "الشعبية 87% | النقاط 1,240 | الترتيب #3"}},
             ]},
         ]
     }
@@ -733,11 +733,6 @@ async def richtest_cmd(message: Message):
         await message.answer("✅ انرسلت الرسالة الغنية فوق 👆 (الميزة شغّالة على بوتك)")
     else:
         await message.answer("⚠️ رد تيليجرام:\n" + json.dumps(data, ensure_ascii=False)[:1500])
-
-
-@dp.callback_query(F.data.startswith("calc:"))
-async def calc_test_cb(callback: CallbackQuery):
-    await callback.answer("زر تجريبي ✨")
 
 
 @dp.message(Command("cancel"))
