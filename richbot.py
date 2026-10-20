@@ -76,12 +76,22 @@ def _dec(stored):
 
 
 # ================= استدعاء Bot API خام =================
+_session = None
+
+
+def _get_session():
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+
 async def _api(token, method, payload):
     url = _API.format(token=token, method=method)
     try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(url, json=payload) as resp:
-                return await resp.json()
+        sess = _get_session()
+        async with sess.post(url, json=payload) as resp:
+            return await resp.json()
     except Exception as e:
         if _logger:
             _logger.exception("rich api %s failed: %s", method, e)
@@ -202,12 +212,15 @@ async def _handle(token, upd):
                             except Exception as e:
                                 if _logger:
                                     _logger.exception("rich calc failed: %s", e)
+            jobs = []
             if cq_id:
-                await _api(token, "answerCallbackQuery", {"callback_query_id": cq_id})
+                jobs.append(_api(token, "answerCallbackQuery", {"callback_query_id": cq_id}))
             if new_card is not None and chat_id and message_id:
-                await _api(token, "editMessageText",
-                           {"chat_id": chat_id, "message_id": message_id,
-                            "rich_message": new_card})
+                jobs.append(_api(token, "editMessageText",
+                                 {"chat_id": chat_id, "message_id": message_id,
+                                  "rich_message": new_card}))
+            if jobs:
+                await asyncio.gather(*jobs, return_exceptions=True)
     except Exception as e:
         if _logger:
             _logger.exception("rich handle failed: %s", e)
