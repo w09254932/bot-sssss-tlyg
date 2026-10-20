@@ -694,6 +694,52 @@ async def cb_st_delok(callback: CallbackQuery):
         reply_markup=store_admin_keyboard(),
     )
 
+@dp.message(Command("richtest"))
+async def richtest_cmd(message: Message):
+    # تجربة الرسائل الغنية (Bot API 10.1+) عبر استدعاء sendRichMessage خام — للمالك فقط
+    if message.from_user is None or message.from_user.id != ADMIN_ID:
+        return
+    rich_message = {
+        "blocks": [
+            {"type": "heading", "size": 2, "text": "🧮 نتيجة الحساب (تجريبي)"},
+            {"type": "paragraph", "text": ["اللاعب: ", {"type": "bold", "text": "خالد العتيبي"}]},
+            {"type": "table", "is_bordered": True, "is_striped": True, "cells": [
+                [{"text": "البند", "is_header": True, "align": "center", "valign": "middle"},
+                 {"text": "القيمة", "is_header": True, "align": "center", "valign": "middle"}],
+                [{"text": "الشعبية", "align": "right", "valign": "middle"},
+                 {"text": "87%", "align": "center", "valign": "middle"}],
+                [{"text": "النقاط", "align": "right", "valign": "middle"},
+                 {"text": "1,240", "align": "center", "valign": "middle"}],
+                [{"text": "الترتيب", "align": "right", "valign": "middle"},
+                 {"text": "#3", "align": "center", "valign": "middle"}],
+            ]},
+            {"type": "buttons", "align": "center", "buttons": [
+                {"text": "🔄 احسب مرة ثانية", "callback_data": "calc:again", "style": "primary"},
+                {"text": "🏆 لوحة الصدارة", "callback_data": "calc:leaderboard"},
+            ]},
+        ]
+    }
+    import aiohttp
+    api_url = f"https://api.telegram.org/bot{bot.token}/sendRichMessage"
+    payload = {"chat_id": message.chat.id, "rich_message": rich_message}
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(api_url, json=payload) as resp:
+                data = await resp.json()
+    except Exception as e:
+        await message.answer(f"❌ خطأ بالاتصال: {e}")
+        return
+    if isinstance(data, dict) and data.get("ok"):
+        await message.answer("✅ انرسلت الرسالة الغنية فوق 👆 (الميزة شغّالة على بوتك)")
+    else:
+        await message.answer("⚠️ رد تيليجرام:\n" + json.dumps(data, ensure_ascii=False)[:1500])
+
+
+@dp.callback_query(F.data.startswith("calc:"))
+async def calc_test_cb(callback: CallbackQuery):
+    await callback.answer("زر تجريبي ✨")
+
+
 @dp.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
