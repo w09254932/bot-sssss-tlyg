@@ -88,16 +88,22 @@ async def _api(token, method, payload):
 
 
 # ================= بناء البطاقة الغنية (ديمو عدّاد) =================
-def _counter_rich(value):
+def _keypad_rich(cur):
+    shown = cur if cur else "0"
+
+    def row(keys):
+        return {"type": "buttons", "align": "center", "buttons": [
+            {"text": label, "callback_data": f"pad:{cur}:{code}"} for code, label in keys
+        ]}
+
     return {
         "blocks": [
-            {"type": "heading", "size": 2, "text": "🧮 عدّاد تفاعلي (ديمو غني)"},
-            {"type": "paragraph", "text": ["القيمة الحالية: ", {"type": "bold", "text": str(value)}]},
-            {"type": "buttons", "align": "center", "buttons": [
-                {"text": "➖", "callback_data": f"cnt:{value}:dec", "style": "danger"},
-                {"text": "0️⃣ تصفير", "callback_data": "cnt:0:set"},
-                {"text": "➕", "callback_data": f"cnt:{value}:inc", "style": "success"},
-            ]},
+            {"type": "heading", "size": 2, "text": "🧮 اكتب رقمك (ديمو لوحة أرقام)"},
+            {"type": "paragraph", "text": ["الرقم: ", {"type": "bold", "text": shown}]},
+            row([("1", "1"), ("2", "2"), ("3", "3")]),
+            row([("4", "4"), ("5", "5"), ("6", "6")]),
+            row([("7", "7"), ("8", "8"), ("9", "9")]),
+            row([("C", "C"), ("0", "0"), ("B", "⌫")]),
         ]
     }
 
@@ -112,7 +118,7 @@ async def _handle(token, upd):
             chat_id = chat.get("id")
             if chat.get("type") == "private" and text.startswith("/start"):
                 r = await _api(token, "sendRichMessage",
-                               {"chat_id": chat_id, "rich_message": _counter_rich(0)})
+                               {"chat_id": chat_id, "rich_message": _keypad_rich("")})
                 if not (isinstance(r, dict) and r.get("ok")) and _logger:
                     _logger.warning("rich sendRichMessage: %s", _json.dumps(r)[:300])
         elif "callback_query" in upd:
@@ -122,26 +128,26 @@ async def _handle(token, upd):
             m = cq.get("message") or {}
             chat_id = (m.get("chat") or {}).get("id")
             message_id = m.get("message_id")
-            new_val = None
+            new_cur = None
             parts = data.split(":")
-            if len(parts) == 3 and parts[0] == "cnt":
-                try:
-                    val = int(parts[1])
-                except Exception:
-                    val = 0
-                op = parts[2]
-                if op == "inc":
-                    new_val = val + 1
-                elif op == "dec":
-                    new_val = val - 1
-                elif op == "set":
-                    new_val = val
+            if len(parts) == 3 and parts[0] == "pad":
+                cur = parts[1]
+                key = parts[2]
+                if key == "C":
+                    new_cur = ""
+                elif key == "B":
+                    new_cur = cur[:-1]
+                elif key.isdigit():
+                    nc = cur + key
+                    if len(nc) > 1 and nc[0] == "0":
+                        nc = nc.lstrip("0")
+                    new_cur = nc if len(nc) <= 15 else cur
             if cq_id:
                 await _api(token, "answerCallbackQuery", {"callback_query_id": cq_id})
-            if new_val is not None and chat_id and message_id:
+            if new_cur is not None and chat_id and message_id:
                 await _api(token, "editMessageText",
                            {"chat_id": chat_id, "message_id": message_id,
-                            "rich_message": _counter_rich(new_val)})
+                            "rich_message": _keypad_rich(new_cur)})
     except Exception as e:
         if _logger:
             _logger.exception("rich handle failed: %s", e)
