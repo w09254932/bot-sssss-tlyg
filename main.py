@@ -29,6 +29,7 @@ from firebase_admin import credentials, firestore
 
 import monitor
 import event
+import richbot
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -311,6 +312,7 @@ def admin_menu_keyboard():
     kb.button(text="🚫 إدارة الحظر", callback_data="admin:ban")
     kb.button(text="🔎 مراقبة اليوزرات", callback_data="admin:mon")
     kb.button(text="🎉 بوت الفعالية", callback_data="admin:ev")
+    kb.button(text="🧮 بوت تفاعلي", callback_data="admin:rich")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -1490,6 +1492,7 @@ def main():
     setup_application(app, dp, bot=bot)
     monitor.setup_monitor(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
     event.setup_event(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
+    richbot.setup_richbot(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
