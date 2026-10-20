@@ -1492,7 +1492,7 @@ def main():
     setup_application(app, dp, bot=bot)
     monitor.setup_monitor(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
     event.setup_event(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
-    richbot.setup_richbot(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard)
+    richbot.setup_richbot(app, dp, bot, db, ADMIN_ID, WEBHOOK_HOST, logger, admin_menu_keyboard, compute_battle=compute_battle)
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ _logger = None
 _admin_menu_markup = None
 
 RICH_BOTS = {}   # token -> {"id":.., "username":..}
+_compute_battle = None   # يُحقن من main.py (معادلة معركة الشعبية)
 
 _API = "https://api.telegram.org/bot{token}/{method}"
 
@@ -88,24 +89,69 @@ async def _api(token, method, payload):
 
 
 # ================= بناء البطاقة الغنية (ديمو عدّاد) =================
-def _keypad_rich(cur):
-    shown = cur if cur else "0"
+def _fmt(x):
+    try:
+        return str(int(x)) if float(x) == int(x) else f"{x:.1f}"
+    except Exception:
+        return str(x)
 
+
+def _digit_rows(step, a, cur):
     def row(keys):
         return {"type": "buttons", "align": "center", "buttons": [
-            {"text": label, "callback_data": f"pad:{cur}:{code}"} for code, label in keys
+            {"text": label, "callback_data": f"k:{step}:{a}:{cur}:{code}"} for code, label in keys
         ]}
+    return [
+        row([("1", "1"), ("2", "2"), ("3", "3")]),
+        row([("4", "4"), ("5", "5"), ("6", "6")]),
+        row([("7", "7"), ("8", "8"), ("9", "9")]),
+        row([("C", "C"), ("0", "0"), ("B", "⌫")]),
+    ]
 
-    return {
-        "blocks": [
-            {"type": "heading", "size": 2, "text": "🧮 اكتب رقمك (ديمو لوحة أرقام)"},
-            {"type": "paragraph", "text": ["الرقم: ", {"type": "bold", "text": shown}]},
-            row([("1", "1"), ("2", "2"), ("3", "3")]),
-            row([("4", "4"), ("5", "5"), ("6", "6")]),
-            row([("7", "7"), ("8", "8"), ("9", "9")]),
-            row([("C", "C"), ("0", "0"), ("B", "⌫")]),
+
+def _calc_card(step, a, cur):
+    shown = f"{int(cur):,}" if cur else "0"
+    if step in (1, "1"):
+        blocks = [
+            {"type": "heading", "size": 2, "text": "⚔️ معركة الشعبية"},
+            {"type": "paragraph", "text": ["الخطوة 1 من 2 — أدخل عدد شعبيتك:"]},
+            {"type": "paragraph", "text": ["➡️ ", {"type": "bold", "text": shown}]},
         ]
-    }
+        blocks += _digit_rows("1", a, cur)
+        blocks.append({"type": "buttons", "align": "center", "buttons": [
+            {"text": "التالي ➡️", "callback_data": f"k:1:{a}:{cur}:OK", "style": "primary"}]})
+    else:
+        a_show = f"{int(a):,}" if a else "0"
+        blocks = [
+            {"type": "heading", "size": 2, "text": "⚔️ معركة الشعبية"},
+            {"type": "paragraph", "text": ["شعبيتك: ", {"type": "bold", "text": a_show}]},
+            {"type": "paragraph", "text": ["الخطوة 2 من 2 — أدخل عدد شعبية خصمك:"]},
+            {"type": "paragraph", "text": ["➡️ ", {"type": "bold", "text": shown}]},
+        ]
+        blocks += _digit_rows("2", a, cur)
+        blocks.append({"type": "buttons", "align": "center", "buttons": [
+            {"text": "احسب ✅", "callback_data": f"k:2:{a}:{cur}:OK", "style": "success"}]})
+    return {"blocks": blocks}
+
+
+def _cell(text, header=False, align="center"):
+    return {"text": text, "is_header": header, "align": align, "valign": "middle"}
+
+
+def _result_card(my, opp, res):
+    return {"blocks": [
+        {"type": "heading", "size": 2, "text": "🏆 نتيجة معركة الشعبية"},
+        {"type": "paragraph", "text": ["النتيجة: ", {"type": "bold", "text": res.get("result_label", "")}]},
+        {"type": "table", "is_bordered": True, "is_striped": True, "cells": [
+            [_cell(""), _cell("الشعبية", True), _cell("النقاط", True), _cell("الناتج", True)],
+            [_cell("أنت", True, "right"), _cell(f"{my:,}"),
+             _cell(str(res.get("my_points", ""))), _cell(_fmt(res.get("my_result")))],
+            [_cell("الخصم", True, "right"), _cell(f"{opp:,}"),
+             _cell(str(res.get("opp_points", ""))), _cell(_fmt(res.get("opp_result")))],
+        ]},
+        {"type": "buttons", "align": "center", "buttons": [
+            {"text": "🔄 معركة جديدة", "callback_data": "k:new", "style": "primary"}]},
+    ]}
 
 
 # ================= المعالج الخام للتحديثات =================
@@ -118,7 +164,7 @@ async def _handle(token, upd):
             chat_id = chat.get("id")
             if chat.get("type") == "private" and text.startswith("/start"):
                 r = await _api(token, "sendRichMessage",
-                               {"chat_id": chat_id, "rich_message": _keypad_rich("")})
+                               {"chat_id": chat_id, "rich_message": _calc_card(1, "", "")})
                 if not (isinstance(r, dict) and r.get("ok")) and _logger:
                     _logger.warning("rich sendRichMessage: %s", _json.dumps(r)[:300])
         elif "callback_query" in upd:
@@ -128,26 +174,40 @@ async def _handle(token, upd):
             m = cq.get("message") or {}
             chat_id = (m.get("chat") or {}).get("id")
             message_id = m.get("message_id")
-            new_cur = None
+            new_card = None
             parts = data.split(":")
-            if len(parts) == 3 and parts[0] == "pad":
-                cur = parts[1]
-                key = parts[2]
-                if key == "C":
-                    new_cur = ""
-                elif key == "B":
-                    new_cur = cur[:-1]
-                elif key.isdigit():
-                    nc = cur + key
-                    if len(nc) > 1 and nc[0] == "0":
-                        nc = nc.lstrip("0")
-                    new_cur = nc if len(nc) <= 15 else cur
+            if parts and parts[0] == "k":
+                if len(parts) == 2 and parts[1] == "new":
+                    new_card = _calc_card(1, "", "")
+                elif len(parts) == 5:
+                    step, a, cur, key = parts[1], parts[2], parts[3], parts[4]
+                    if key == "C":
+                        new_card = _calc_card(step, a, "")
+                    elif key == "B":
+                        new_card = _calc_card(step, a, cur[:-1])
+                    elif key.isdigit():
+                        nc = cur + key
+                        if len(nc) > 1 and nc[0] == "0":
+                            nc = nc.lstrip("0")
+                        if len(nc) > 15:
+                            nc = cur
+                        new_card = _calc_card(step, a, nc)
+                    elif key == "OK":
+                        if step == "1" and cur:
+                            new_card = _calc_card("2", cur, "")
+                        elif step == "2" and a and cur and _compute_battle is not None:
+                            try:
+                                res = _compute_battle(int(a), int(cur), "individual")
+                                new_card = _result_card(int(a), int(cur), res)
+                            except Exception as e:
+                                if _logger:
+                                    _logger.exception("rich calc failed: %s", e)
             if cq_id:
                 await _api(token, "answerCallbackQuery", {"callback_query_id": cq_id})
-            if new_cur is not None and chat_id and message_id:
+            if new_card is not None and chat_id and message_id:
                 await _api(token, "editMessageText",
                            {"chat_id": chat_id, "message_id": message_id,
-                            "rich_message": _keypad_rich(new_cur)})
+                            "rich_message": new_card})
     except Exception as e:
         if _logger:
             _logger.exception("rich handle failed: %s", e)
@@ -303,8 +363,9 @@ async def _rich_startup():
     asyncio.create_task(_rich_startup_bg())
 
 
-def setup_richbot(app, dp, main_bot, db, admin_id, webhook_host, logger, admin_menu_markup=None):
-    global _main_bot, _db, _ADMIN_ID, _WEBHOOK_HOST, _logger, _admin_menu_markup
+def setup_richbot(app, dp, main_bot, db, admin_id, webhook_host, logger, admin_menu_markup=None, compute_battle=None):
+    global _main_bot, _db, _ADMIN_ID, _WEBHOOK_HOST, _logger, _admin_menu_markup, _compute_battle
+    _compute_battle = compute_battle
     _main_bot = main_bot
     _db = db
     _ADMIN_ID = admin_id
